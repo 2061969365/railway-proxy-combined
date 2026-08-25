@@ -42,11 +42,13 @@ curl http://127.0.0.1:4096/v1/models | head
 
 > 若面板支持 `v1*` 通配可合并 2+3；否则拆成 `v1` + `v1/*` 两条。
 
+伪装页：`https://sg.domain/` 显示《三体·地球往事》深度解读站（`F:\worker\san-ti-three-body\index.html`），`https://sg.domain/?mirror` 显示节点订阅面板。
+
 ## Railway 部署
 
-1. GitHub 推送后自动 `ghcr.io/<owner>/railway-proxy-combined:latest` (Actions)
+1. GitHub 推送后自动 `ghcr.io/2061969365/railway-proxy-combined:latest` + `:main` + `:sha-<commit>` (Actions, 需在 GitHub Packages 将包设为 Public)
 2. Railway → New Service → Deploy from GitHub / Docker Image → 填 `TUNNEL_TOKEN`
-3. 健康检查 `GET /api/status`
+3. 健康检查 `GET /api/status` (`railway.json` 已配置)
 
 ## 客户端
 
