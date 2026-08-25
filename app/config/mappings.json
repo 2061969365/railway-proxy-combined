@@ -1,0 +1,23 @@
+{
+  "claude-fable-5": "deepseek-v4-flash-free",
+  "claude-mythos-5": "deepseek-v4-flash-free",
+  "claude-sonnet-4-6": "deepseek-v4-flash-free",
+  "claude-opus-4-8": "mimo-v2.5-free",
+  "claude-haiku-4-5": "nemotron-3-ultra-free",
+  "claude-sonnet-4": "north-mini-code-free",
+  "claude-sonnet-4-20250514": "deepseek-v4-flash-free",
+  "claude-opus-4-20250918": "mimo-v2.5-free",
+  "claude-haiku-3-5-20241022": "nemotron-3-ultra-free",
+  "claude-3-5-sonnet-20241022": "north-mini-code-free",
+  "claude-3-5-haiku-20241022": "nemotron-3-ultra-free",
+  "claude-opus-4-5": "mimo-v2.5-free",
+  "claude-opus-4-5-20251101": "mimo-v2.5-free",
+  "claude-sonnet-4-5": "deepseek-v4-flash-free",
+  "claude-sonnet-4-5-20250929": "deepseek-v4-flash-free",
+  "claude-haiku-4-5-20251001": "nemotron-3-ultra-free",
+  "claude-3-7-sonnet-20250219": "north-mini-code-free",
+  "claude-3-7-sonnet-latest": "north-mini-code-free",
+  "claude-opus-4-1-20250805": "mimo-v2.5-free",
+  "deepseek-v4-flash": "deepseek-v4-flash-free",
+  "deepseek-v4-pro": "mimo-v2.5-free"
+}

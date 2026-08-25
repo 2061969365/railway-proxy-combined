@@ -1,0 +1,287 @@
+/* ============================================================
+   Pages.css — OpenCode Free Proxy
+   Page layout layer only: structure / spacing / proportion /
+   responsive / whitespace. Consumes design tokens exclusively.
+   Component visuals (buttons, cards, tables, badges) live in
+   styles.css. No hardcoded colors/spacing/radius here.
+   ============================================================ */
+
+/* --- Global container --- */
+body {
+  background: var(--bg-base);
+  font-family: var(--font-body);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+#app {
+  max-width: var(--container-max);
+  margin: 0 auto;
+  padding: var(--space-4);
+}
+
+/* --- Header layout --- */
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  min-height: var(--nav-height);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  margin-bottom: var(--space-6);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+#statusBadge {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.tab {
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: var(--text-md);
+  font-family: inherit;
+  color: var(--text-muted);
+  background: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.tab:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.lang-toggle {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* --- Headings --- */
+h1 {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-bold);
+  letter-spacing: var(--tracking-tight);
+}
+
+h3 {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+}
+
+.card h3 {
+  margin-bottom: var(--space-3);
+}
+
+/* --- Dashboard layout --- */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+}
+
+.stat-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: var(--space-5);
+  text-align: center;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+/* --- Card spacing rhythm --- */
+.card {
+  margin-bottom: var(--space-5);
+}
+
+/* --- Tables --- */
+.data-table {
+  min-width: 700px;
+}
+
+th,
+td {
+  padding: var(--space-2) var(--space-3);
+}
+
+.card:has(.data-table) {
+  overflow-x: auto;
+}
+
+/* --- Notify form layout --- */
+.notify-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--space-4);
+}
+
+.notify-row > div {
+  min-width: 0;
+}
+
+.notify-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+
+.notify-result {
+  display: inline-flex;
+  align-items: center;
+  font-size: var(--text-sm);
+}
+
+/* --- Playground proportion (sidebar fixed 260px, chat flexes) --- */
+.pg-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.pg-sidebar {
+  position: sticky;
+  top: var(--space-4);
+  z-index: var(--z-sticky);
+}
+
+.pg-sidebar .card {
+  position: static;
+}
+
+.pg-main {
+  min-width: 0;
+}
+
+.pg-chat-card {
+  min-height: 60vh;
+  padding: 0;
+  flex-direction: column;
+}
+
+.pg-messages {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+
+.pg-input-row {
+  padding: var(--space-3) var(--space-4);
+}
+
+/* --- Responsive: tablets & narrow laptops --- */
+@media (max-width: 800px) {
+  .pg-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .pg-sidebar {
+    position: static;
+  }
+
+  .pg-chat-card {
+    min-height: 50vh;
+  }
+
+  .pg-messages {
+    max-height: 50vh;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  header {
+    flex-wrap: wrap;
+  }
+
+  .header-right {
+    flex-wrap: wrap;
+  }
+}
+
+/* --- Responsive: mobile --- */
+@media (max-width: 600px) {
+  header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .header-right {
+    width: 100%;
+  }
+
+  nav {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .tab {
+    flex-shrink: 0;
+    white-space: nowrap;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .notify-row {
+    grid-template-columns: 1fr;
+  }
+
+  .inline-form {
+    flex-direction: column;
+  }
+
+  .inline-form .btn-primary {
+    width: 100%;
+  }
+}

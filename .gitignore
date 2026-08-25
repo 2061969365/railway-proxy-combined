@@ -1,0 +1,4 @@
+node_modules
+reasoning-cache.json
+debug-400.json
+*.log
