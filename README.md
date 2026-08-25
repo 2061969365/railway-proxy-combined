@@ -7,7 +7,7 @@
 ## 架构
 
 ```
-Cloudflare Edge (sg.yourdomain.com:443) - 示例域名，替换为你的域名
+Cloudflare Edge (sg.yourdomain.com:443)
   ├── /ws-node  → 127.0.0.1:8080  (xray VLESS+WS)
   ├── /v1/*     → 127.0.0.1:4096  (proxy: /v1/models, /v1/messages, /v1/chat/completions)
   ├── /api/*    → 127.0.0.1:4096  (proxy dashboard API)
@@ -33,7 +33,7 @@ curl http://127.0.0.1:4096/api/status
 curl http://127.0.0.1:4096/v1/models | head
 ```
 
-## Cloudflare Tunnel 路由 (按序，以 `sg.yourdomain.com` 为例)
+## Cloudflare Tunnel 路由 (按序)
 
 1. `sg.yourdomain.com` `/ws-node` → `http://127.0.0.1:8080` (HTTP + Websockets Enabled) — 置顶
 2. `sg.yourdomain.com` `/v1` → `http://127.0.0.1:4096` (HTTP) — 前缀匹配，覆盖 `/v1/*`
