@@ -54,16 +54,40 @@ echo "[init] 启动 Xray (8080)..."
 XRAY_PID=$!
 
 echo "[init] 启动 opencode-free-proxy (固定 4096)..."
-node --use-env-proxy server.js &
+# 启动并捕获日志
+node --use-env-proxy server.js > /tmp/proxy.log 2>&1 &
 PROXY_PID=$!
 echo "[init] proxy PID=$PROXY_PID"
-sleep 5
+# 等待 proxy 就绪，最多 30s
+for i in $(seq 1 15); do
+  sleep 2
+  if curl -s --max-time 3 http://127.0.0.1:4096/api/status >/dev/null 2>&1; then
+    echo "[debug] proxy 就绪 (尝试 $i)"
+    curl -s http://127.0.0.1:4096/api/status | head -c 500
+    echo ""
+    break
+  else
+    echo "[debug] 等待 proxy... ($i/15) pid $PROXY_PID alive? $(kill -0 $PROXY_PID 2>&1 && echo yes || echo no)"
+    if ! kill -0 $PROXY_PID 2>/dev/null; then
+      echo "[ERR] proxy 进程已退出，日志："
+      cat /tmp/proxy.log 2>&1 || true
+      echo "[ERR] netstat:"
+      netstat -tln 2>&1 || ss -tln 2>&1 || true
+      break
+    fi
+  fi
+  if [ $i -eq 15 ]; then
+    echo "[ERR] proxy 15次仍未就绪，最后日志："
+    cat /tmp/proxy.log 2>&1 || true
+    netstat -tln 2>&1 || ss -tln 2>&1 || true
+  fi
+done
 echo "[debug] netstat after proxy start:"
-netstat -tln 2>&1 || ss -tln 2>&1 || cat /proc/net/tcp 2>&1 | head
-echo "[debug] curl 127.0.0.1:4096/api/status:"
-curl -s --max-time 5 http://127.0.0.1:4096/api/status || echo "[debug] curl 4096 failed code $?"
+netstat -tln 2>&1 || ss -tln 2>&1 || true
 echo "[debug] cat settings.json:"
 cat /app/config/settings.json 2>&1
+echo "[debug] proxy log head:"
+head -n 50 /tmp/proxy.log 2>&1 || true
 # 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查 (可选)
 if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
   echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
@@ -105,11 +129,13 @@ if [ -z "${TUNNEL_TOKEN:-}" ]; then
   exit 1
 fi
 echo "[tunnel] 通过 QUIC 建立隧道..."
-/usr/local/bin/cloudflared tunnel --protocol quic --no-autoupdate run --token "$TUNNEL_TOKEN" &
+/usr/local/bin/cloudflared tunnel --protocol quic --no-autoupdate run --token "$TUNNEL_TOKEN" > /tmp/cf.log 2>&1 &
 CF_PID=$!
 sleep 5
-echo "[debug] cloudflared log check, tunnel status:"
-curl -s --max-time 5 http://127.0.0.1:4096/api/status && echo " [tunnel debug] proxy still ok after cloudflared start" || echo " [tunnel debug] proxy unreachable after cloudflared start"
+echo "[debug] cloudflared started PID=$CF_PID"
+cat /tmp/cf.log 2>&1 | head -n 30 || true
+echo "[debug] curl after cf start:"
+curl -s --max-time 5 http://127.0.0.1:4096/api/status && echo " [tunnel debug] proxy still ok after cloudflared start" || echo " [tunnel debug] proxy unreachable after cloudflared start (proxy log):" && cat /tmp/proxy.log 2>&1 | head -n 30 || true
 
 # === 7. 健康监控 (15s) - 仅监控关键端口，不过度敏感 ===
 echo "[monitor] 进入健康监控循环..."
