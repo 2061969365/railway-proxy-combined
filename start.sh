@@ -57,6 +57,13 @@ echo "[init] 启动 opencode-free-proxy (固定 4096)..."
 node --use-env-proxy server.js &
 PROXY_PID=$!
 echo "[init] proxy PID=$PROXY_PID"
+sleep 5
+echo "[debug] netstat after proxy start:"
+netstat -tln 2>&1 || ss -tln 2>&1 || cat /proc/net/tcp 2>&1 | head
+echo "[debug] curl 127.0.0.1:4096/api/status:"
+curl -s --max-time 5 http://127.0.0.1:4096/api/status || echo "[debug] curl 4096 failed code $?"
+echo "[debug] cat settings.json:"
+cat /app/config/settings.json 2>&1
 # 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查 (可选)
 if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
   echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
@@ -100,6 +107,9 @@ fi
 echo "[tunnel] 通过 QUIC 建立隧道..."
 /usr/local/bin/cloudflared tunnel --protocol quic --no-autoupdate run --token "$TUNNEL_TOKEN" &
 CF_PID=$!
+sleep 5
+echo "[debug] cloudflared log check, tunnel status:"
+curl -s --max-time 5 http://127.0.0.1:4096/api/status && echo " [tunnel debug] proxy still ok after cloudflared start" || echo " [tunnel debug] proxy unreachable after cloudflared start"
 
 # === 7. 健康监控 (15s) - 仅监控关键端口，不过度敏感 ===
 echo "[monitor] 进入健康监控循环..."
