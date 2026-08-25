@@ -3,7 +3,7 @@ FROM teddysun/xray:latest AS xray-source
 FROM cloudflare/cloudflared:latest AS cf-source
 FROM node:20-alpine
 
-RUN apk add --no-cache bash curl busybox-extras unzip
+RUN apk add --no-cache bash curl busybox-extras unzip socat
 
 COPY --from=xray-source /usr/bin/xray /usr/bin/xray
 COPY --from=cf-source /usr/local/bin/cloudflared /usr/local/bin/cloudflared

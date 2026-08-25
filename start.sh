@@ -24,7 +24,7 @@ if [ -f /tmp/index.html ]; then
   cp /tmp/index.html /app/www/index.html
 fi
 
-# === 3. 兼容 Proxy 配置 (host/notify + Railway PORT) ===
+# === 3. 兼容 Proxy 配置 (host/notify) - 保持 4096 固定，不跟随 Railway PORT ===
 node -e "
 const fs=require('fs');
 const p='/app/config/settings.json';
@@ -35,10 +35,10 @@ try{
   if(j.notify && (j.notify.enabled!==false || (j.notify.exe && j.notify.exe!==''))){
     j.notify.enabled=false; j.notify.exe=''; ch=true; console.log('[proxy] notify 已禁用 (容器环境)');
   }
-  const portEnv=process.env.PORT;
-  if(portEnv && Number(portEnv)!==j.port){
-    console.log('[proxy] Railway PORT='+portEnv+' 覆盖 settings.port '+j.port+' -> '+portEnv);
-    j.port=Number(portEnv); ch=true;
+  // 强制保持 4096，避免 Railway PORT 覆盖导致 Tunnel 502
+  if(j.port!==4096){
+    console.log('[proxy] 强制 port 4096 (原 '+j.port+' -> 4096)，忽略 Railway PORT='+ (process.env.PORT||'<empty>'));
+    j.port=4096; ch=true;
   }
   if(ch) fs.writeFileSync(p, JSON.stringify(j,null,2));
 }catch(e){ console.log('[proxy] settings patch 跳过:', e.message); }
@@ -53,10 +53,21 @@ echo "[init] 启动 Xray (8080)..."
 /usr/bin/xray -config /tmp/xray.json &
 XRAY_PID=$!
 
-echo "[init] 启动 opencode-free-proxy (4096 or \$PORT)..."
+echo "[init] 启动 opencode-free-proxy (固定 4096)..."
 node --use-env-proxy server.js &
 PROXY_PID=$!
 echo "[init] proxy PID=$PROXY_PID"
+# 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查 (可选)
+if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
+  echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
+  # 用 socat 或 nc 转发 PORT -> 4096 (alpine 无 socat 时用 busybox httpd 替代方案：忽略)
+  if command -v socat >/dev/null 2>&1; then
+    socat TCP-LISTEN:$PORT,fork TCP:127.0.0.1:4096 &
+    echo "[proxy] socat 转发 $PORT -> 4096 已启动"
+  else
+    echo "[proxy] 未安装 socat，跳过 PORT 转发 (不影响 Tunnel)"
+  fi
+fi
 
 # === 5. 哪吒探针 (可选) ===
 NEZHA_PATH="/app/nezha-agent"
@@ -90,22 +101,28 @@ echo "[tunnel] 通过 QUIC 建立隧道..."
 /usr/local/bin/cloudflared tunnel --protocol quic --no-autoupdate run --token "$TUNNEL_TOKEN" &
 CF_PID=$!
 
-# === 7. 健康监控 (15s) ===
+# === 7. 健康监控 (15s) - 仅监控关键端口，不过度敏感 ===
 echo "[monitor] 进入健康监控循环..."
 while true; do
   sleep 15
-  # 获取实际 proxy 端口
-  PROXY_PORT=$(node -e "try{console.log(JSON.parse(require('fs').readFileSync('/app/config/settings.json','utf8')).port)}catch(e){console.log(4096)}" 2>/dev/null || echo 4096)
+  PROXY_PORT=4096
 
   netstat -tln 2>/dev/null | grep -q :8080; VLESS_OK=$?
   netstat -tln 2>/dev/null | grep -q :8081; HTTP_OK=$?
   netstat -tln 2>/dev/null | grep -q :$PROXY_PORT; PROXY_OK=$?
   pidof cloudflared >/dev/null 2>&1; CF_OK=$?
-  kill -0 $XRAY_PID 2>/dev/null; XRAY_ALIVE=$?
-  kill -0 $PROXY_PID 2>/dev/null; PROXY_ALIVE=$?
-
-  if [ $VLESS_OK -ne 0 ] || [ $HTTP_OK -ne 0 ] || [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ] || [ $XRAY_ALIVE -ne 0 ] || [ $PROXY_ALIVE -ne 0 ]; then
-    echo "🚨 断流警报 VLESS:$VLESS_OK HTTP:$HTTP_OK PROXY:$PROXY_OK/$PROXY_ALIVE CF:$CF_OK XRAY:$XRAY_ALIVE"
-    exit 1
+  # 进程存活检查放宽：只要端口在即可，不强制 kill -0
+  if [ $VLESS_OK -ne 0 ] || [ $HTTP_OK -ne 0 ] || [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ]; then
+    echo "🚨 断流警报 VLESS:$VLESS_OK HTTP:$HTTP_OK PROXY:$PROXY_OK CF:$CF_OK"
+    # 不立即 exit 1，等待 30s 再试一次，避免瞬时抖动导致 Railway 重启风暴
+    sleep 30
+    netstat -tln 2>/dev/null | grep -q :$PROXY_PORT; PROXY_OK=$?
+    pidof cloudflared >/dev/null 2>&1; CF_OK=$?
+    if [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ]; then
+      echo "🚨 二次确认失败，退出触发重启"
+      exit 1
+    else
+      echo "[monitor] 二次确认恢复，继续运行"
+    fi
   fi
 done
