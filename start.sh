@@ -61,8 +61,8 @@ else
 fi
 
 echo "[init] 启动 opencode-free-proxy (固定 4096)..."
-# 启动并捕获日志
-node --use-env-proxy server.js > /tmp/proxy.log 2>&1 &
+# Railway 版无需代理，直连 opencode.ai，移除 --use-env-proxy (Node20 不支持)
+node server.js > /tmp/proxy.log 2>&1 &
 PROXY_PID=$!
 echo "[init] proxy PID=$PROXY_PID"
 # 等待 proxy 就绪，最多 30s

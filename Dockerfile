@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 FROM teddysun/xray:latest AS xray-source
 FROM cloudflare/cloudflared:latest AS cf-source
-FROM node:20-alpine
+FROM node:22-alpine
 
 RUN apk add --no-cache bash curl busybox-extras unzip socat
 
