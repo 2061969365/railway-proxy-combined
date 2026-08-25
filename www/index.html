@@ -1038,28 +1038,13 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
 
         const urlParams = new URLSearchParams(window.location.search);
         if (urlParams.has('mirror')) {
-            document.getElementById('fakePage').style.display = 'none';
-            document.getElementById('realPage').style.display = 'block';
-            document.getElementById('pageTitle').innerText = '🛸 智能节点订阅管理面板';
-
-            document.getElementById('mainStyle').innerHTML = `
-                body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background-color: #0f172a; color: #e2e8f0; margin: 0; padding: 30px 15px; display: flex; justify-content: center; text-align: left; }
-                .container { background: #1e293b; padding: 25px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4); max-width: 700px; width: 100%; }
-                .header-area { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 15px; margin-bottom: 20px; }
-                h1 { font-size: 20px; color: #38bdf8; margin: 0; border: none; padding: 0; width: auto; }
-                .badge { background: #059669; color: white; font-size: 11px; padding: 4px 8px; border-radius: 99px; font-weight: bold; }
-                .card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 15px; margin-bottom: 15px; }
-                .label { font-weight: 600; font-size: 13px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em;}
-                .value { font-family: monospace; font-size: 11px; word-break: break-all; background: #1e293b; padding: 10px; border-radius: 6px; border: 1px solid #475569; color: #cbd5e1; overflow-y: auto; margin-bottom: 10px;}
-                .input-group { display: flex; gap: 10px; }
-                input { flex: 1; background: #0f172a; border: 1px solid #475569; border-radius: 6px; padding: 8px; color: white; font-family: monospace; font-size: 13px; }
-                button { background-color: #0284c7; color: white; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
-                .btn-copy { width: 100%; background: #0284c7; font-size: 12px; font-weight: bold; padding: 7px; border: none; border-radius: 4px; color: white; cursor: pointer;}
-                .ip-tag { background: #1e293b; border: 1px solid #475569; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; color: #38bdf8; cursor: pointer; }
-                .ip-tag:hover { background: #38bdf8; color: #0f172a; }
-                .footer { text-align: center; font-size: 11px; color: #64748b; margin-top: 15px; border-top: 1px solid #334155; padding-top: 12px; }
-            `;
-
+            const fakeEl = document.getElementById('fakePage');
+            if (fakeEl) fakeEl.style.display = 'none';
+            const realEl = document.getElementById('realPage');
+            if (realEl) { realEl.style.display = 'block'; realEl.classList.remove('hidden-panel'); }
+            const titleEl2 = document.getElementById('pageTitle');
+            if (titleEl2) titleEl2.innerText = '🛸 智能节点订阅管理面板';
+            // 样式由第二段脚本统一处理，避免 mainStyle 丢失导致崩溃
             generateLinks(currentHost);
             fetchOptimizedIPs();
         }

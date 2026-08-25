@@ -1,9 +1,9 @@
 #!/bin/bash
 set -e
 
-# === 1. 固定 UUID (保留 railway-variation 锁定值) ===
-export UUID="a29738e5-bee1-c0fc-b484-ae7c49cbc828"
-echo "[init] UUID 锁定为: $UUID"
+# === 1. UUID (允许 env 覆盖，默认锁定值) ===
+export UUID="${UUID:-a29738e5-bee1-c0fc-b484-ae7c49cbc828}"
+echo "[init] UUID: $UUID"
 
 # === 2. 动态 IP/归属地探测 ===
 echo "[init] 探测 Railway 出口 IP..."
@@ -46,12 +46,19 @@ try{
 
 # === 4. 启动各服务 ===
 echo "[init] 启动 busybox httpd (8081)..."
-httpd -p 8081 -h /app/www &
+httpd -f -p 8081 -h /app/www &
 HTTP_PID=$!
 
 echo "[init] 启动 Xray (8080)..."
-/usr/bin/xray -config /tmp/xray.json &
+/usr/bin/xray -config /tmp/xray.json > /tmp/xray.log 2>&1 &
 XRAY_PID=$!
+sleep 1
+if ! kill -0 $XRAY_PID 2>/dev/null; then
+  echo "[ERR] Xray 启动失败，日志："
+  cat /tmp/xray.log 2>&1 || true
+else
+  echo "[debug] Xray PID=$XRAY_PID 已启动"
+fi
 
 echo "[init] 启动 opencode-free-proxy (固定 4096)..."
 # 启动并捕获日志
