@@ -50,8 +50,11 @@ app.use(express.static(path.join(__dirname, "public")));
 
 // Dashboard under /api/ui so it is reachable via Cloudflare Tunnel rule (/api -> 4096)
 // Assets are referenced relatively (tokens.css/app.js), fetches use /api/* /v1/* which route to this server.
-app.get("/api/ui", (req, res) => res.redirect("/api/ui/"));
-app.use("/api/ui", express.static(path.join(__dirname, "public")));
+// Redirect bare /api/ui -> /api/ui/ so relative asset URLs resolve correctly.
+app.use("/api/ui", (req, res, next) => {
+  if (req.path === "") return res.redirect(301, "/api/ui/");
+  next();
+}, express.static(path.join(__dirname, "public")));
 
 const router = express.Router();
 
