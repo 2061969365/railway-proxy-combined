@@ -48,6 +48,11 @@ app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
+// Dashboard under /api/ui so it is reachable via Cloudflare Tunnel rule (/api -> 4096)
+// Assets are referenced relatively (tokens.css/app.js), fetches use /api/* /v1/* which route to this server.
+app.get("/api/ui", (req, res) => res.redirect("/api/ui/"));
+app.use("/api/ui", express.static(path.join(__dirname, "public")));
+
 const router = express.Router();
 
 router.get("/models", async (req, res) => {
