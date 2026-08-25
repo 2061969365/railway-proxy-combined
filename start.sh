@@ -88,12 +88,14 @@ echo "[debug] cat settings.json:"
 cat /app/config/settings.json 2>&1
 echo "[debug] proxy log head:"
 head -n 50 /tmp/proxy.log 2>&1 || true
-# 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查 (可选)
+# 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查
+# 注意 PORT 不能与 Xray 8080 / httpd 8081 冲突
 if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
-  echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
-  # 用 socat 或 nc 转发 PORT -> 4096 (alpine 无 socat 时用 busybox httpd 替代方案：忽略)
-  if command -v socat >/dev/null 2>&1; then
-    socat TCP-LISTEN:$PORT,fork TCP:127.0.0.1:4096 &
+  if [ "$PORT" = "8080" ] || [ "$PORT" = "8081" ]; then
+    echo "[WARN] Railway PORT=$PORT 与 Xray/httpd 冲突，跳过 socat 转发。请在 Railway Variables 将 PORT 改为 3000 或 4096 后 Redeploy"
+  elif command -v socat >/dev/null 2>&1; then
+    echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
+    socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:4096 &
     echo "[proxy] socat 转发 $PORT -> 4096 已启动"
   else
     echo "[proxy] 未安装 socat，跳过 PORT 转发 (不影响 Tunnel)"
