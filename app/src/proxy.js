@@ -73,7 +73,6 @@ function dedupeToolCallIds(body) {
   const messages = body?.messages;
   if (!Array.isArray(messages)) return;
   let pending = [];
-  let lastAssistantToolCount = 0;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m?.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
@@ -83,7 +82,6 @@ function dedupeToolCallIds(body) {
         console.log(`[PROXY] filtered ${before - filtered.length} empty tool_calls at pos ${i}`);
       }
       m.tool_calls = filtered;
-      lastAssistantToolCount = m.tool_calls.length;
       pending = [];
       m.tool_calls.forEach((c, j) => {
         if (c?.type === "function") {
@@ -97,18 +95,18 @@ function dedupeToolCallIds(body) {
         const map = pending.shift();
         if (map) m.tool_call_id = map.new;
       } else {
-        // No pending (either no assistant tool_calls or filtered), check if this tool result corresponds to a filtered empty call
-        // If last assistant had fewer tool_calls than tool results, this is an orphan for the empty call - drop it
-        if (lastAssistantToolCount === 0) {
-          // No valid tool calls in last assistant, this tool result is orphan - mark for removal
-          m._orphan = true;
-        } else if (!m.tool_call_id) {
-          m.tool_call_id = `call_pos${i}_unknown`;
-        }
+        // Strict: no pending assistant tool_call to match this result.
+        // Keep only if it was already remapped above; otherwise it's an orphan
+        // (e.g. debug-400.json: 1 tool_call but 2 tool results -> second has call_01a... and must be dropped,
+        // otherwise responses API returns "No function call found for function call output").
+        m._orphan = true;
       }
+    } else if (m?.role !== "assistant") {
+      // Any non-tool, non-assistant message breaks the adjacency; leftover pending calls are stale
+      // Do not clear pending here - tool results may be batched after assistant, but a user message means new turn
+      if (m?.role === "user") pending = [];
     }
   }
-  // Remove orphan tool results (those for filtered empty calls)
   const originalLen = messages.length;
   const filteredMessages = messages.filter(m => !m._orphan);
   if (filteredMessages.length !== originalLen) {
@@ -127,10 +125,9 @@ function isResponsesModel(model) {
 function chatBodyToResponses(chatBody) {
   try {
     const parsed = JSON.parse(chatBody);
-    // Debug: log tools for 400 diagnosis
     if (parsed.tools && parsed.tools.length > 10) console.log(`[PROXY] chatBodyToResponses tools count ${parsed.tools.length} first: ${JSON.stringify(parsed.tools[0]).slice(0,200)}`);
     const input = [];
-    const instructions = parsed.messages?.filter(m => m.role === "system").map(m => typeof m.content === "string" ? m.content : "").join("\n") || undefined;
+    const instructions = parsed.messages?.filter(m => m.role === "system").map(m => typeof m.content === "string" ? m.content : Array.isArray(m.content) ? m.content.map(c=>c.text||"").join("\n") : "").filter(Boolean).join("\n") || undefined;
     for (const m of (parsed.messages || [])) {
       if (m.role === "system") continue;
       if (m.role === "user") {
@@ -151,13 +148,39 @@ function chatBodyToResponses(chatBody) {
         input.push({ type: "function_call_output", call_id: cid, output: typeof m.content === "string" ? m.content : JSON.stringify(m.content) });
       }
     }
+    // Defensive: drop orphan function_call_output whose call_id has no matching function_call.
+    // Responses API is strict: "No function call found for function call output with call_id '...'" => 400.
+    const callIds = new Set(input.filter(x => x.type === "function_call").map(x => x.call_id));
+    const filtered = input.filter(x => x.type !== "function_call_output" || callIds.has(x.call_id));
+    if (filtered.length !== input.length) {
+      console.log(`[PROXY] chatBodyToResponses filtered ${input.length - filtered.length} orphan function_call_output`);
+      input.length = 0;
+      filtered.forEach(x => input.push(x));
+    }
     const out = { model: parsed.model, input, stream: parsed.stream !== false };
     if (instructions) out.instructions = instructions;
-    if (parsed.tools) out.tools = parsed.tools.map(t => ({ type: "function", name: t.function?.name || t.name, description: t.function?.description || "", parameters: t.function?.parameters || t.input_schema || { type: "object", properties: {} } }));
+    if (parsed.tools) {
+      const mapped = [];
+      let hasWebSearchFn = false;
+      for (const t of parsed.tools) {
+        const name = t.function?.name || t.name || "";
+        const lname = name.toLowerCase();
+        if (lname === "websearch" || lname === "web_search") { hasWebSearchFn = true; }
+        mapped.push({ type: "function", name, description: t.function?.description || t.description || "", parameters: t.function?.parameters || t.input_schema || { type: "object", properties: {} } });
+      }
+      // For muse-spark: also add hosted web_search so model can ground even if it doesn't call the function.
+      // Keep original function so Claude Code's WebSearch tool remains usable (model may call it as tool_use).
+      if (hasWebSearchFn && !mapped.some(x => x.type === "web_search")) {
+        mapped.push({ type: "web_search" });
+        console.log(`[PROXY] added hosted web_search for muse-spark (kept WebSearch function)`);
+      }
+      const seen = new Set();
+      out.tools = mapped.filter(x => { const k = x.type + (x.name||""); if (seen.has(k)) return false; seen.add(k); return true; });
+    }
     if (parsed.tool_choice) {
       const tc = parsed.tool_choice;
       if (tc === "auto" || tc === "none" || tc === "required") out.tool_choice = tc;
-      else if (tc.type) out.tool_choice = tc.type === "tool" ? { type: "function", name: tc.name } : tc.type;
+      else if (tc && typeof tc === "object" && tc.type) out.tool_choice = tc.type === "function" ? tc : tc.type;
     }
     if (parsed.max_tokens) out.max_output_tokens = parsed.max_tokens;
     if (parsed.temperature != null) out.temperature = parsed.temperature;
@@ -205,15 +228,23 @@ function createResponsesToChatSSETransformer(originalModel) {
         if (ev.type === "response.output_text.delta" && ev.delta) {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.item_id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { content: ev.delta }, finish_reason: null }] })}\n\n`));
         } else if (ev.type === "response.output_item.added" && ev.item?.type === "function_call") {
-          const idx = ev.output_index ?? 0;
-          toolCalls.set(ev.item.id || `call_${idx}`, { id: ev.item.call_id || ev.item.id, name: ev.item.name || "", args: "" });
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.item.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: ev.item.call_id || ev.item.id, type: "function", function: { name: ev.item.name || "", arguments: "" } }] }, finish_reason: null }] })}\n\n`));
+          const rawIdx = ev.output_index ?? toolCalls.size;
+          const key = ev.item.id || `call_${rawIdx}`;
+          toolCalls.set(key, { id: ev.item.call_id || ev.item.id, name: ev.item.name || "", args: "", idx: rawIdx });
+          // also index by call_id for delta lookup (responses uses item_id == item.id)
+          if (ev.item.call_id && ev.item.call_id !== key) toolCalls.set(ev.item.call_id, toolCalls.get(key));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.item.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: rawIdx, id: ev.item.call_id || ev.item.id, type: "function", function: { name: ev.item.name || "", arguments: "" } }] }, finish_reason: null }] })}\n\n`));
         } else if (ev.type === "response.function_call_arguments.delta" && ev.delta) {
           const itemId = ev.item_id;
-          const tc = toolCalls.get(itemId);
+          let tc = toolCalls.get(itemId);
+          // fallback: some providers send delta with output_index instead of item_id
+          if (!tc && typeof ev.output_index === "number") {
+            for (const v of toolCalls.values()) { if (v.idx === ev.output_index) { tc = v; break; } }
+          }
           if (tc) {
             tc.args += ev.delta;
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: itemId, object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: ev.delta } }] }, finish_reason: null }] })}\n\n`));
+            const idx = tc.idx ?? 0;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: itemId, object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, function: { arguments: ev.delta } }] }, finish_reason: null }] })}\n\n`));
           }
         } else if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
           // finalize tool call if needed
