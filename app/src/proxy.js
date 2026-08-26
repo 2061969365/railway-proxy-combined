@@ -206,9 +206,11 @@ function normalizeError(format, status, rawText) {
   let msg = rawText;
   try {
     const j = JSON.parse(rawText);
-    msg = (j.error?.message) || j.message || rawText;
+    msg = (j.error?.message) || j.error?.error?.message || j.message || rawText;
   } catch {}
   if (typeof msg !== "string") msg = String(msg);
+  msg = msg.trim();
+  if (!msg) msg = `Upstream ${status} with empty body (check debug-400.json for request)`;
   msg = msg.slice(0, 500);
   if (format === "claude") {
     const map = {
