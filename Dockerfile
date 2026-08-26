@@ -32,3 +32,4 @@ RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh \
 EXPOSE 4096 8080 8081
 
 ENTRYPOINT ["/app/start.sh"]
+# redeploy trigger 08/26/2026 09:35:39
