@@ -354,8 +354,8 @@ async function handleProxy(req, res, format) {
       }
     }
 
-    // 500 fallback: try responses endpoint for models that require it (e.g., muse-spark)
-    if (!upstreamRes.ok && upstreamRes.status >= 500 && isResponsesModel(resolvedModel)) {
+    // 500 fallback: try responses endpoint for any model that fails on chat (future-proof for responses-based free models)
+    if (!upstreamRes.ok && upstreamRes.status >= 500) {
       let peek500;
       try { peek500 = cachedErrText ?? await upstreamRes.text(); } catch { peek500 = ""; }
       cachedErrText = peek500;
