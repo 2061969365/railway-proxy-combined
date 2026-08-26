@@ -76,6 +76,8 @@ function dedupeToolCallIds(body) {
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m?.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      // Filter out tool calls with empty name (invalid for upstream)
+      m.tool_calls = m.tool_calls.filter(tc => tc?.function?.name);
       pending = [];
       m.tool_calls.forEach((c, j) => {
         if (c?.type === "function") {
@@ -114,7 +116,9 @@ function chatBodyToResponses(chatBody) {
         if (text) input.push({ role: "assistant", content: [{ type: "output_text", text }] });
         if (Array.isArray(m.tool_calls)) {
           for (const tc of m.tool_calls) {
-            input.push({ type: "function_call", call_id: tc.id, name: tc.function?.name || "", arguments: tc.function?.arguments || "{}" });
+            const name = tc.function?.name || "";
+            if (!name) continue;
+            input.push({ type: "function_call", call_id: tc.id, name, arguments: tc.function?.arguments || "{}" });
           }
         }
       } else if (m.role === "tool") {

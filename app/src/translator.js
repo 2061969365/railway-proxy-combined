@@ -36,12 +36,12 @@ function anthropicToOpenAI(body, reasoningCache) {
         }
         const toolCalls = blocks
           ? blocks
-              .filter((b) => b.type === "tool_use")
+              .filter((b) => b.type === "tool_use" && b.name)
               .map((b) => ({
                 id: b.id || `toolu_${Math.random().toString(36).slice(2, 10)}`,
                 type: "function",
                 function: {
-                  name: b.name || "",
+                  name: b.name,
                   arguments: JSON.stringify(b.input ?? {}),
                 },
               }))
