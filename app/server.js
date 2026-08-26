@@ -189,6 +189,15 @@ api.post("/notify/test", async (req, res) => {
 
 api.get("/model-meta", (req, res) => res.json(MODEL_META));
 api.get("/model-scores", (req, res) => res.json(getFreeModelScores()));
+api.get("/debug-400", (req, res) => {
+  try {
+    const p = path.join(__dirname, "debug-400.json");
+    const data = JSON.parse(fs.readFileSync(p, "utf-8"));
+    res.json(data);
+  } catch (e) {
+    res.status(404).json({ error: "no debug data", message: e.message });
+  }
+});
 
 app.use("/api", api);
 

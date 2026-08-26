@@ -477,7 +477,7 @@ async function handleProxy(req, res, format) {
       if (errText === null) {
         try { errText = await upstreamRes.text(); } catch { errText = ""; }
       }
-      console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 150)}`);
+      console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${upstreamBody.slice(0, 500)}`);
       if (upstreamRes.status === 400) {
         try {
           const payload = JSON.stringify({ status: upstreamRes.status, body: JSON.parse(upstreamBody), error: errText.slice(0, 500) }, null, 2);
