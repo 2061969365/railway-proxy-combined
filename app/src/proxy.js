@@ -92,18 +92,15 @@ function dedupeToolCallIds(body) {
 }
 
 function isResponsesModel(model) {
-  // Models that require /v1/responses (OpenAI Responses API) instead of /v1/chat/completions
-  // Detected via provider npm @ai-sdk/openai (e.g., muse-spark) vs @ai-sdk/openai-compatible
-  return typeof model === "string" && (model.startsWith("muse-spark") || model.startsWith("gpt-") || model.startsWith("o1-") || model.startsWith("o3-"));
+  // Only muse-spark family requires /v1/responses (verified via zen docs table @ai-sdk/openai)
+  // Keep narrow to avoid misrouting gpt-* which use chat/completions
+  return typeof model === "string" && model.startsWith("muse-spark");
 }
 
 function chatBodyToResponses(chatBody) {
   try {
     const parsed = JSON.parse(chatBody);
     const input = [];
-    const sys = parsed.messages?.find(m => m.role === "system");
-    if (sys?.content) input.push({ role: "assistant", content: [{ type: "output_text", text: String(sys.content) }] }); // system as instruction fallback
-    // Actually use instructions field if system exists
     const instructions = parsed.messages?.filter(m => m.role === "system").map(m => typeof m.content === "string" ? m.content : "").join("\n") || undefined;
     for (const m of (parsed.messages || [])) {
       if (m.role === "system") continue;
@@ -124,6 +121,12 @@ function chatBodyToResponses(chatBody) {
     }
     const out = { model: parsed.model, input, stream: parsed.stream !== false };
     if (instructions) out.instructions = instructions;
+    if (parsed.tools) out.tools = parsed.tools.map(t => ({ type: "function", name: t.function?.name || t.name, description: t.function?.description || "", parameters: t.function?.parameters || t.input_schema || { type: "object", properties: {} } }));
+    if (parsed.tool_choice) {
+      const tc = parsed.tool_choice;
+      if (tc === "auto" || tc === "none" || tc === "required") out.tool_choice = tc;
+      else if (tc.type) out.tool_choice = tc.type === "tool" ? { type: "function", name: tc.name } : tc.type;
+    }
     if (parsed.max_tokens) out.max_output_tokens = parsed.max_tokens;
     if (parsed.temperature != null) out.temperature = parsed.temperature;
     if (parsed.top_p != null) out.top_p = parsed.top_p;
@@ -136,12 +139,14 @@ function responsesToChat(responsesJson, originalModel) {
     const j = typeof responsesJson === "string" ? JSON.parse(responsesJson) : responsesJson;
     const outText = (j.output || []).filter(o => o.type === "message").flatMap(o => o.content || []).filter(c => c.type === "output_text").map(c => c.text).join("\n");
     const reasoning = (j.output || []).filter(o => o.type === "reasoning").flatMap(o => o.summary || []).map(s => s.text).join("\n");
+    const toolCalls = (j.output || []).filter(o => o.type === "function_call").map(o => ({ id: o.call_id || o.id, type: "function", function: { name: o.name, arguments: o.arguments || "{}" } }));
+    const hasTool = toolCalls.length > 0;
     return {
       id: j.id || `gen-${Date.now()}`,
       object: "chat.completion",
       created: Math.floor(Date.now()/1000),
       model: j.model || originalModel,
-      choices: [{ index: 0, finish_reason: j.status === "completed" ? "stop" : "length", message: { role: "assistant", content: outText || null, reasoning: reasoning || undefined } }],
+      choices: [{ index: 0, finish_reason: hasTool ? "tool_calls" : (j.status === "completed" ? "stop" : "length"), message: { role: "assistant", content: outText || "", reasoning_content: reasoning || undefined, reasoning: reasoning || undefined, tool_calls: hasTool ? toolCalls : undefined } }],
       usage: { prompt_tokens: j.usage?.input_tokens || 0, completion_tokens: j.usage?.output_tokens || 0, total_tokens: j.usage?.total_tokens || 0 }
     };
   } catch { return responsesJson; }

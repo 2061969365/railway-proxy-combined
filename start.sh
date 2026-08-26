@@ -96,14 +96,15 @@ cat /app/config/settings.json 2>&1
 echo "[debug] proxy log head:"
 head -n 50 /tmp/proxy.log 2>&1 || true
 # 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查
-# 注意 PORT 不能与 Xray 8080 / httpd 8081 冲突
+# 注意 PORT 不能与 Xray 8080 / httpd 8081 冲突，提前启动以通过健康检查
 if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
   if [ "$PORT" = "8080" ] || [ "$PORT" = "8081" ]; then
     echo "[WARN] Railway PORT=$PORT 与 Xray/httpd 冲突，跳过 socat 转发。请在 Railway Variables 将 PORT 改为 3000 或 4096 后 Redeploy"
   elif command -v socat >/dev/null 2>&1; then
     echo "[proxy] 检测到 Railway PORT=$PORT，额外监听该端口供平台健康检查"
-    socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:4096 &
-    echo "[proxy] socat 转发 $PORT -> 4096 已启动"
+    socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:4096 > /tmp/socat.log 2>&1 &
+    SOCAT_PID=$!
+    echo "[proxy] socat 转发 $PORT -> 4096 已启动 PID=$SOCAT_PID"
   else
     echo "[proxy] 未安装 socat，跳过 PORT 转发 (不影响 Tunnel)"
   fi
@@ -156,14 +157,23 @@ while true; do
   netstat -tln 2>/dev/null | grep -q :8081; HTTP_OK=$?
   netstat -tln 2>/dev/null | grep -q :$PROXY_PORT; PROXY_OK=$?
   pidof cloudflared >/dev/null 2>&1; CF_OK=$?
-  # 进程存活检查放宽：只要端口在即可，不强制 kill -0
-  if [ $VLESS_OK -ne 0 ] || [ $HTTP_OK -ne 0 ] || [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ]; then
-    echo "🚨 断流警报 VLESS:$VLESS_OK HTTP:$HTTP_OK PROXY:$PROXY_OK CF:$CF_OK"
-    # 不立即 exit 1，等待 30s 再试一次，避免瞬时抖动导致 Railway 重启风暴
-    sleep 30
+  # 监控 socat 转发的 PORT（若存在）
+  if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ] && [ "$PORT" != "8080" ] && [ "$PORT" != "8081" ]; then
+    netstat -tln 2>/dev/null | grep -q :$PORT; SOCAT_OK=$?
+    if [ $SOCAT_OK -ne 0 ]; then echo "[WARN] socat PORT $PORT 未监听"; fi
+    kill -0 ${SOCAT_PID:-} 2>/dev/null; SOCAT_ALIVE=$?
+  else
+    SOCAT_OK=0; SOCAT_ALIVE=0
+  fi
+  if [ $VLESS_OK -ne 0 ] || [ $HTTP_OK -ne 0 ] || [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ] || [ $SOCAT_OK -ne 0 ] || [ $SOCAT_ALIVE -ne 0 ]; then
+    echo "🚨 断流警报 VLESS:$VLESS_OK HTTP:$HTTP_OK PROXY:$PROXY_OK CF:$CF_OK SOCAT:$SOCAT_OK/$SOCAT_ALIVE"
+    sleep 10
     netstat -tln 2>/dev/null | grep -q :$PROXY_PORT; PROXY_OK=$?
     pidof cloudflared >/dev/null 2>&1; CF_OK=$?
-    if [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ]; then
+    if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ] && [ "$PORT" != "8080" ] && [ "$PORT" != "8081" ]; then
+      netstat -tln 2>/dev/null | grep -q :$PORT; SOCAT_OK=$?
+    fi
+    if [ $PROXY_OK -ne 0 ] || [ $CF_OK -ne 0 ] || [ $SOCAT_OK -ne 0 ]; then
       echo "🚨 二次确认失败，退出触发重启"
       exit 1
     else
