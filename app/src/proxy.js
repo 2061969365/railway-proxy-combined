@@ -501,13 +501,15 @@ async function handleProxy(req, res, format) {
         cachedErrText = null;
       } else if (respRes) {
         try { const t = await respRes.text(); console.log(`[PROXY] ✗ responses fallback ${respRes.status}: ${t.slice(0,500)} | responsesBody ${responsesBody.slice(0,500)}`); } catch {}
-        // Also try without tools if the fallback failed due to too many tools
         if (respRes.status === 400) {
           console.log(`[PROXY] trying responses fallback without tools for ${originalModel}`);
           try {
             const noToolsBody = JSON.parse(responsesBody);
             delete noToolsBody.tools;
             delete noToolsBody.tool_choice;
+            if (Array.isArray(noToolsBody.input)) {
+              noToolsBody.input = noToolsBody.input.filter(item => item.type !== "function_call" && item.type !== "function_call_output");
+            }
             const respRes2 = await fetch(API.RESPONSES, { method: "POST", headers, body: JSON.stringify(noToolsBody), signal: controller.signal });
             if (respRes2 && respRes2.ok) {
               if (!stream) {
@@ -531,22 +533,45 @@ async function handleProxy(req, res, format) {
     }
 
     if (!upstreamRes.ok) {
+      console.log(`[PROXY] Final check: upstream ${upstreamRes.status} for ${resolvedModel}, tools=${(() => { try{ return JSON.parse(upstreamBody).tools?.length || 0 } catch{ return 0 } })()}`);
       // For 400 with many tools, try without tools (common for large system + 30+ tools)
       if (upstreamRes.status === 400) {
         try {
           const parsedBody = JSON.parse(upstreamBody);
           if (Array.isArray(parsedBody.tools) && parsedBody.tools.length > 15) {
             console.log(`[PROXY] 400 with ${parsedBody.tools.length} tools, retrying without tools for ${resolvedModel}`);
+            const useResponses = isResponsesModel(resolvedModel);
             const noToolsBody = { ...parsedBody };
             delete noToolsBody.tools;
             delete noToolsBody.tool_choice;
-            const noToolsRes = await fetch(isResponsesModel(resolvedModel) ? API.RESPONSES : API.CHAT, { method: "POST", headers, body: JSON.stringify(noToolsBody), signal: controller.signal });
+            if (Array.isArray(noToolsBody.messages)) {
+              noToolsBody.messages = noToolsBody.messages.filter(m => m.role !== "tool" && !(m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length));
+            }
+            const targetUrl = useResponses ? API.RESPONSES : API.CHAT;
+            const finalBody = useResponses ? chatBodyToResponses(JSON.stringify(noToolsBody)) : JSON.stringify(noToolsBody);
+            console.log(`[PROXY] retry target: ${targetUrl}, body preview: ${finalBody.slice(0,200)}`);
+            const noToolsRes = await fetch(targetUrl, { method: "POST", headers, body: finalBody, signal: controller.signal });
             if (noToolsRes.ok) {
-              upstreamRes = noToolsRes;
+              if (!stream) {
+                const txt = await noToolsRes.text();
+                if (useResponses) {
+                  const chatJson = responsesToChat(txt, originalModel);
+                  upstreamRes = new Response(JSON.stringify(chatJson), { status: 200, headers: { "Content-Type": "application/json" } });
+                } else {
+                  upstreamRes = new Response(txt, { status: 200, headers: { "Content-Type": "application/json" } });
+                }
+              } else {
+                if (useResponses) {
+                  upstreamRes = noToolsRes;
+                  upstreamRes._isResponses = true;
+                } else {
+                  upstreamRes = noToolsRes;
+                }
+              }
               cachedErrText = null;
               console.log(`[PROXY] ✓ retry without tools succeeded for ${originalModel}`);
             } else {
-              try { const t = await noToolsRes.text(); console.log(`[PROXY] retry without tools also ${noToolsRes.status}: ${t.slice(0,200)}`); } catch {}
+              try { const t = await noToolsRes.text(); console.log(`[PROXY] retry without tools also ${noToolsRes.status}: ${t.slice(0,300)}`); } catch {}
             }
           }
         } catch (e) { console.log(`[PROXY] retry without tools error: ${e.message}`); }
