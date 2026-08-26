@@ -735,4 +735,4 @@ async function handleProxy(req, res, format) {
   }
 }
 
-export { handleProxy };
+export { handleProxy, chatBodyToResponses, responsesToChat, isResponsesModel, createResponsesToChatSSETransformer };
