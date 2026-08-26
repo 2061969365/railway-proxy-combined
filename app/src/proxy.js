@@ -73,11 +73,17 @@ function dedupeToolCallIds(body) {
   const messages = body?.messages;
   if (!Array.isArray(messages)) return;
   let pending = [];
+  let lastAssistantToolCount = 0;
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m?.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
-      // Filter out tool calls with empty name (invalid for upstream)
-      m.tool_calls = m.tool_calls.filter(tc => tc?.function?.name);
+      const before = m.tool_calls.length;
+      const filtered = m.tool_calls.filter(tc => tc?.function?.name);
+      if (filtered.length !== before) {
+        console.log(`[PROXY] filtered ${before - filtered.length} empty tool_calls at pos ${i}`);
+      }
+      m.tool_calls = filtered;
+      lastAssistantToolCount = m.tool_calls.length;
       pending = [];
       m.tool_calls.forEach((c, j) => {
         if (c?.type === "function") {
@@ -86,10 +92,29 @@ function dedupeToolCallIds(body) {
           c.id = newId;
         }
       });
-    } else if (m?.role === "tool" && pending.length) {
-      const map = pending.shift();
-      if (map) m.tool_call_id = map.new;
+    } else if (m?.role === "tool") {
+      if (pending.length > 0) {
+        const map = pending.shift();
+        if (map) m.tool_call_id = map.new;
+      } else {
+        // No pending (either no assistant tool_calls or filtered), check if this tool result corresponds to a filtered empty call
+        // If last assistant had fewer tool_calls than tool results, this is an orphan for the empty call - drop it
+        if (lastAssistantToolCount === 0) {
+          // No valid tool calls in last assistant, this tool result is orphan - mark for removal
+          m._orphan = true;
+        } else if (!m.tool_call_id) {
+          m.tool_call_id = `call_pos${i}_unknown`;
+        }
+      }
     }
+  }
+  // Remove orphan tool results (those for filtered empty calls)
+  const originalLen = messages.length;
+  const filteredMessages = messages.filter(m => !m._orphan);
+  if (filteredMessages.length !== originalLen) {
+    console.log(`[PROXY] filtered ${originalLen - filteredMessages.length} orphan tool results`);
+    messages.length = 0;
+    filteredMessages.forEach(m => messages.push(m));
   }
 }
 
@@ -122,7 +147,8 @@ function chatBodyToResponses(chatBody) {
           }
         }
       } else if (m.role === "tool") {
-        input.push({ type: "function_call_output", call_id: m.tool_call_id, output: typeof m.content === "string" ? m.content : JSON.stringify(m.content) });
+        const cid = m.tool_call_id || `call_unknown_${input.length}`;
+        input.push({ type: "function_call_output", call_id: cid, output: typeof m.content === "string" ? m.content : JSON.stringify(m.content) });
       }
     }
     const out = { model: parsed.model, input, stream: parsed.stream !== false };
@@ -451,8 +477,9 @@ async function handleProxy(req, res, format) {
       let peek500;
       try { peek500 = cachedErrText ?? await upstreamRes.text(); } catch { peek500 = ""; }
       cachedErrText = peek500;
-      console.log(`[PROXY] ${upstreamRes.status} for ${resolvedModel}, trying responses endpoint...`);
+      console.log(`[PROXY] ${upstreamRes.status} for ${resolvedModel}, trying responses endpoint... | upstreamBody preview ${upstreamBody.slice(0, 300)}`);
       const responsesBody = chatBodyToResponses(upstreamBody);
+      console.log(`[PROXY] responses fallback body preview ${responsesBody.slice(0, 500)}`);
       let respRes;
       try {
         respRes = await fetch(API.RESPONSES, { method: "POST", headers, body: responsesBody, signal: controller.signal });
@@ -473,38 +500,86 @@ async function handleProxy(req, res, format) {
         }
         cachedErrText = null;
       } else if (respRes) {
-        try { const t = await respRes.text(); console.log(`[PROXY] ✗ responses fallback ${respRes.status}: ${t.slice(0,150)}`); } catch {}
+        try { const t = await respRes.text(); console.log(`[PROXY] ✗ responses fallback ${respRes.status}: ${t.slice(0,500)} | responsesBody ${responsesBody.slice(0,500)}`); } catch {}
+        // Also try without tools if the fallback failed due to too many tools
+        if (respRes.status === 400) {
+          console.log(`[PROXY] trying responses fallback without tools for ${originalModel}`);
+          try {
+            const noToolsBody = JSON.parse(responsesBody);
+            delete noToolsBody.tools;
+            delete noToolsBody.tool_choice;
+            const respRes2 = await fetch(API.RESPONSES, { method: "POST", headers, body: JSON.stringify(noToolsBody), signal: controller.signal });
+            if (respRes2 && respRes2.ok) {
+              if (!stream) {
+                const txt2 = await respRes2.text();
+                const chatJson2 = responsesToChat(txt2, originalModel);
+                upstreamRes = new Response(JSON.stringify(chatJson2), { status: 200, headers: { "Content-Type": "application/json" } });
+                console.log(`[PROXY] ✓ responses fallback without tools succeeded for ${originalModel}`);
+                cachedErrText = null;
+              } else {
+                upstreamRes = respRes2;
+                upstreamRes._isResponses = true;
+                console.log(`[PROXY] ✓ responses fallback without tools (stream) for ${originalModel}`);
+                cachedErrText = null;
+              }
+            } else if (respRes2) {
+              try { const t2 = await respRes2.text(); console.log(`[PROXY] ✗ responses fallback without tools ${respRes2.status}: ${t2.slice(0,300)}`); } catch {}
+            }
+          } catch (e) { console.log(`[PROXY] responses without tools error: ${e.message}`); }
+        }
       }
     }
 
     if (!upstreamRes.ok) {
-      stopTimers();
-      let errText = cachedErrText;
-      if (errText === null) {
-        try { errText = await upstreamRes.text(); } catch { errText = ""; }
-      }
-      console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${upstreamBody.slice(0, 500)}`);
+      // For 400 with many tools, try without tools (common for large system + 30+ tools)
       if (upstreamRes.status === 400) {
         try {
-          const payload = JSON.stringify({ status: upstreamRes.status, body: JSON.parse(upstreamBody), error: errText.slice(0, 500) }, null, 2);
-          writeFile(path.join(__dirname, "..", "debug-400.json"), payload, () => {});
-        } catch {}
+          const parsedBody = JSON.parse(upstreamBody);
+          if (Array.isArray(parsedBody.tools) && parsedBody.tools.length > 15) {
+            console.log(`[PROXY] 400 with ${parsedBody.tools.length} tools, retrying without tools for ${resolvedModel}`);
+            const noToolsBody = { ...parsedBody };
+            delete noToolsBody.tools;
+            delete noToolsBody.tool_choice;
+            const noToolsRes = await fetch(isResponsesModel(resolvedModel) ? API.RESPONSES : API.CHAT, { method: "POST", headers, body: JSON.stringify(noToolsBody), signal: controller.signal });
+            if (noToolsRes.ok) {
+              upstreamRes = noToolsRes;
+              cachedErrText = null;
+              console.log(`[PROXY] ✓ retry without tools succeeded for ${originalModel}`);
+            } else {
+              try { const t = await noToolsRes.text(); console.log(`[PROXY] retry without tools also ${noToolsRes.status}: ${t.slice(0,200)}`); } catch {}
+            }
+          }
+        } catch (e) { console.log(`[PROXY] retry without tools error: ${e.message}`); }
       }
-      if (upstreamRes.status === 429) {
-        notifyError("rate-limit", `[限流] ${originalModel} 上游 429: ${errText.slice(0, 120)}`);
-      } else if (upstreamRes.status >= 500) {
-        notifyError(`upstream-${upstreamRes.status}`, `[上游 ${upstreamRes.status}] ${originalModel}: ${errText.slice(0, 120)}`);
-      } else if (upstreamRes.status === 400) {
-        notifyError(`upstream-400`, `[上游 400] ${originalModel}: ${errText.slice(0, 120)}`);
+      if (!upstreamRes.ok) {
+        stopTimers();
+        let errText = cachedErrText;
+        if (errText === null) {
+          try { errText = await upstreamRes.text(); } catch { errText = ""; }
+        }
+        console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${upstreamBody.slice(0, 500)}`);
+        if (upstreamRes.status === 400) {
+          try {
+            const payload = JSON.stringify({ status: upstreamRes.status, body: JSON.parse(upstreamBody), error: errText.slice(0, 500) }, null, 2);
+            writeFile(path.join(__dirname, "..", "debug-400.json"), payload, () => {});
+          } catch {}
+        }
+        if (upstreamRes.status === 429) {
+          notifyError("rate-limit", `[限流] ${originalModel} 上游 429: ${errText.slice(0, 120)}`);
+        } else if (upstreamRes.status >= 500) {
+          notifyError(`upstream-${upstreamRes.status}`, `[上游 ${upstreamRes.status}] ${originalModel}: ${errText.slice(0, 120)}`);
+        } else if (upstreamRes.status === 400) {
+          notifyError(`upstream-400`, `[上游 400] ${originalModel}: ${errText.slice(0, 120)}`);
+        }
+        add({
+          method: req.method, path: req.path,
+          model: originalModel, mappedTo: body.model,
+          status: upstreamRes.status, duration: Date.now() - start,
+          error: errText.slice(0, 200),
+        });
+        if (isAlive()) res.status(upstreamRes.status).json(normalizeError(format, upstreamRes.status, errText));
+        return;
       }
-      add({
-        method: req.method, path: req.path,
-        model: originalModel, mappedTo: body.model,
-        status: upstreamRes.status, duration: Date.now() - start,
-        error: errText.slice(0, 200),
-      });
-      if (isAlive()) res.status(upstreamRes.status).json(normalizeError(format, upstreamRes.status, errText));
-      return;
     }
 
     add({
