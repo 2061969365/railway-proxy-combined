@@ -3,6 +3,7 @@ const ZEN_PATH = "/zen/v1";
 
 const API = {
   CHAT: `${OPCODE_URL}${ZEN_PATH}/chat/completions`,
+  RESPONSES: `${OPCODE_URL}${ZEN_PATH}/responses`,
   MESSAGES: `${OPCODE_URL}${ZEN_PATH}/messages`,
   MODELS: `${OPCODE_URL}${ZEN_PATH}/models`,
 };

@@ -91,6 +91,62 @@ function dedupeToolCallIds(body) {
   }
 }
 
+function isResponsesModel(model) {
+  // Models that require /v1/responses (OpenAI Responses API) instead of /v1/chat/completions
+  // Detected via provider npm @ai-sdk/openai (e.g., muse-spark) vs @ai-sdk/openai-compatible
+  return typeof model === "string" && (model.startsWith("muse-spark") || model.startsWith("gpt-") || model.startsWith("o1-") || model.startsWith("o3-"));
+}
+
+function chatBodyToResponses(chatBody) {
+  try {
+    const parsed = JSON.parse(chatBody);
+    const input = [];
+    const sys = parsed.messages?.find(m => m.role === "system");
+    if (sys?.content) input.push({ role: "assistant", content: [{ type: "output_text", text: String(sys.content) }] }); // system as instruction fallback
+    // Actually use instructions field if system exists
+    const instructions = parsed.messages?.filter(m => m.role === "system").map(m => typeof m.content === "string" ? m.content : "").join("\n") || undefined;
+    for (const m of (parsed.messages || [])) {
+      if (m.role === "system") continue;
+      if (m.role === "user") {
+        const text = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+        input.push({ role: "user", content: [{ type: "input_text", text }] });
+      } else if (m.role === "assistant") {
+        const text = typeof m.content === "string" ? m.content : "";
+        if (text) input.push({ role: "assistant", content: [{ type: "output_text", text }] });
+        if (Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            input.push({ type: "function_call", call_id: tc.id, name: tc.function?.name || "", arguments: tc.function?.arguments || "{}" });
+          }
+        }
+      } else if (m.role === "tool") {
+        input.push({ type: "function_call_output", call_id: m.tool_call_id, output: typeof m.content === "string" ? m.content : JSON.stringify(m.content) });
+      }
+    }
+    const out = { model: parsed.model, input, stream: parsed.stream !== false };
+    if (instructions) out.instructions = instructions;
+    if (parsed.max_tokens) out.max_output_tokens = parsed.max_tokens;
+    if (parsed.temperature != null) out.temperature = parsed.temperature;
+    if (parsed.top_p != null) out.top_p = parsed.top_p;
+    return JSON.stringify(out);
+  } catch { return chatBody; }
+}
+
+function responsesToChat(responsesJson, originalModel) {
+  try {
+    const j = typeof responsesJson === "string" ? JSON.parse(responsesJson) : responsesJson;
+    const outText = (j.output || []).filter(o => o.type === "message").flatMap(o => o.content || []).filter(c => c.type === "output_text").map(c => c.text).join("\n");
+    const reasoning = (j.output || []).filter(o => o.type === "reasoning").flatMap(o => o.summary || []).map(s => s.text).join("\n");
+    return {
+      id: j.id || `gen-${Date.now()}`,
+      object: "chat.completion",
+      created: Math.floor(Date.now()/1000),
+      model: j.model || originalModel,
+      choices: [{ index: 0, finish_reason: j.status === "completed" ? "stop" : "length", message: { role: "assistant", content: outText || null, reasoning: reasoning || undefined } }],
+      usage: { prompt_tokens: j.usage?.input_tokens || 0, completion_tokens: j.usage?.output_tokens || 0, total_tokens: j.usage?.total_tokens || 0 }
+    };
+  } catch { return responsesJson; }
+}
+
 function normalizeError(format, status, rawText) {
   let msg = rawText;
   try {
@@ -295,6 +351,39 @@ async function handleProxy(req, res, format) {
           if (isAlive()) res.status(fallbackRes.status).json(normalizeError(format, fallbackRes.status, errText2 + " | suggestion: try mimo-v2.5-free directly"));
           return;
         }
+      }
+    }
+
+    // 500 fallback: try responses endpoint for models that require it (e.g., muse-spark)
+    if (!upstreamRes.ok && upstreamRes.status >= 500 && isResponsesModel(resolvedModel)) {
+      let peek500;
+      try { peek500 = cachedErrText ?? await upstreamRes.text(); } catch { peek500 = ""; }
+      cachedErrText = peek500;
+      console.log(`[PROXY] ${upstreamRes.status} for ${resolvedModel}, trying responses endpoint...`);
+      const responsesBody = chatBodyToResponses(upstreamBody);
+      let respRes;
+      try {
+        respRes = await fetch(API.RESPONSES, { method: "POST", headers, body: responsesBody, signal: controller.signal });
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        console.log(`[PROXY] responses fallback network error: ${e.message}`);
+      }
+      if (respRes && respRes.ok) {
+        // Non-stream: translate responses -> chat, stream: passthrough raw SSE (client will handle)
+        if (!stream) {
+          const txt = await respRes.text();
+          const chatJson = responsesToChat(txt, originalModel);
+          upstreamRes = { ok: true, status: 200, headers: respRes.headers, json: async () => chatJson, text: async () => JSON.stringify(chatJson), body: Readable.toWeb(Readable.from([JSON.stringify(chatJson)])) };
+          // Mock minimal fetch Response for downstream handling
+          upstreamRes = new Response(JSON.stringify(chatJson), { status: 200, headers: { "Content-Type": "application/json" } });
+          console.log(`[PROXY] ✓ responses fallback succeeded for ${originalModel}`);
+        } else {
+          upstreamRes = respRes;
+          console.log(`[PROXY] ✓ responses fallback (stream) for ${originalModel}`);
+        }
+        cachedErrText = null;
+      } else if (respRes) {
+        try { const t = await respRes.text(); console.log(`[PROXY] ✗ responses fallback ${respRes.status}: ${t.slice(0,150)}`); } catch {}
       }
     }
 
