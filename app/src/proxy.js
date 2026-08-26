@@ -100,6 +100,8 @@ function isResponsesModel(model) {
 function chatBodyToResponses(chatBody) {
   try {
     const parsed = JSON.parse(chatBody);
+    // Debug: log tools for 400 diagnosis
+    if (parsed.tools && parsed.tools.length > 10) console.log(`[PROXY] chatBodyToResponses tools count ${parsed.tools.length} first: ${JSON.stringify(parsed.tools[0]).slice(0,200)}`);
     const input = [];
     const instructions = parsed.messages?.filter(m => m.role === "system").map(m => typeof m.content === "string" ? m.content : "").join("\n") || undefined;
     for (const m of (parsed.messages || [])) {
