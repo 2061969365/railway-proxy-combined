@@ -281,8 +281,34 @@ async function handleProxy(req, res, format) {
   };
 
   try {
-    let upstreamRes = await fetchUpstream();
+    // Direct routing for known responses models (avoid 4x retry delay)
+    let upstreamRes;
     let cachedErrText = null;
+    if (isResponsesModel(resolvedModel)) {
+      console.log(`[PROXY] ${resolvedModel} is responses model, direct to /v1/responses`);
+      const responsesBody = chatBodyToResponses(upstreamBody);
+      try {
+        const respRes = await fetch(API.RESPONSES, { method: "POST", headers, body: responsesBody, signal: controller.signal });
+        if (respRes.ok) {
+          if (!stream) {
+            const txt = await respRes.text();
+            const chatJson = responsesToChat(txt, originalModel);
+            upstreamRes = new Response(JSON.stringify(chatJson), { status: 200, headers: { "Content-Type": "application/json" } });
+          } else {
+            upstreamRes = respRes;
+          }
+        } else {
+          upstreamRes = respRes;
+          try { cachedErrText = await respRes.text(); } catch { cachedErrText = ""; }
+        }
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        console.log(`[PROXY] direct responses error: ${e.message}, fallback to chat`);
+        upstreamRes = await fetchUpstream();
+      }
+    } else {
+      upstreamRes = await fetchUpstream();
+    }
 
     // 400 fallback: deepseek-v4-flash-free Model is unavailable -> mimo-v2.5-free
     if (!upstreamRes.ok && upstreamRes.status === 400) {
