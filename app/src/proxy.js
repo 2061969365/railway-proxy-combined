@@ -156,9 +156,9 @@ function createResponsesToChatSSETransformer(originalModel) {
   let buffer = "";
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
+  const toolCalls = new Map();
   return new TransformStream({
     transform(chunk, controller) {
-      // chunk may be Uint8Array or string
       const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
       buffer += text;
       const lines = buffer.split("\n");
@@ -171,10 +171,25 @@ function createResponsesToChatSSETransformer(originalModel) {
         let ev;
         try { ev = JSON.parse(d); } catch { continue; }
         if (ev.type === "response.output_text.delta" && ev.delta) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.response?.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { content: ev.delta }, finish_reason: null }] })}\n\n`));
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.item_id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { content: ev.delta }, finish_reason: null }] })}\n\n`));
+        } else if (ev.type === "response.output_item.added" && ev.item?.type === "function_call") {
+          const idx = ev.output_index ?? 0;
+          toolCalls.set(ev.item.id || `call_${idx}`, { id: ev.item.call_id || ev.item.id, name: ev.item.name || "", args: "" });
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.item.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: idx, id: ev.item.call_id || ev.item.id, type: "function", function: { name: ev.item.name || "", arguments: "" } }] }, finish_reason: null }] })}\n\n`));
+        } else if (ev.type === "response.function_call_arguments.delta" && ev.delta) {
+          const itemId = ev.item_id;
+          const tc = toolCalls.get(itemId);
+          if (tc) {
+            tc.args += ev.delta;
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: itemId, object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: ev.delta } }] }, finish_reason: null }] })}\n\n`));
+          }
+        } else if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
+          // finalize tool call if needed
         } else if (ev.type === "response.completed" || ev.type === "response.incomplete") {
           const usage = ev.response?.usage || {};
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.response?.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: {}, finish_reason: ev.type === "response.completed" ? "stop" : "length" }], usage: { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0, total_tokens: usage.total_tokens || 0 } })}\n\n`));
+          // If we had tool calls, ensure finish_reason is tool_calls
+          const hasTool = toolCalls.size > 0;
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.response?.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: {}, finish_reason: hasTool ? "tool_calls" : (ev.type === "response.completed" ? "stop" : "length") }], usage: { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0, total_tokens: usage.total_tokens || 0 } })}\n\n`));
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } else if (ev.type === "response.failed" || ev.type === "error") {
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: ev.error || ev } )}\n\n`));
