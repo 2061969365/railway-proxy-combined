@@ -147,6 +147,41 @@ function responsesToChat(responsesJson, originalModel) {
   } catch { return responsesJson; }
 }
 
+function createResponsesToChatSSETransformer(originalModel) {
+  let buffer = "";
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  return new TransformStream({
+    transform(chunk, controller) {
+      // chunk may be Uint8Array or string
+      const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+      buffer += text;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data: ")) continue;
+        const d = t.slice(6);
+        if (d === "[DONE]") continue;
+        let ev;
+        try { ev = JSON.parse(d); } catch { continue; }
+        if (ev.type === "response.output_text.delta" && ev.delta) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.response?.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: { content: ev.delta }, finish_reason: null }] })}\n\n`));
+        } else if (ev.type === "response.completed" || ev.type === "response.incomplete") {
+          const usage = ev.response?.usage || {};
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id: ev.response?.id || "gen", object: "chat.completion.chunk", created: Math.floor(Date.now()/1000), model: originalModel, choices: [{ index: 0, delta: {}, finish_reason: ev.type === "response.completed" ? "stop" : "length" }], usage: { prompt_tokens: usage.input_tokens || 0, completion_tokens: usage.output_tokens || 0, total_tokens: usage.total_tokens || 0 } })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } else if (ev.type === "response.failed" || ev.type === "error") {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: ev.error || ev } )}\n\n`));
+        }
+      }
+    },
+    flush(controller) {
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+    }
+  });
+}
+
 function normalizeError(format, status, rawText) {
   let msg = rawText;
   try {
@@ -295,7 +330,10 @@ async function handleProxy(req, res, format) {
             const chatJson = responsesToChat(txt, originalModel);
             upstreamRes = new Response(JSON.stringify(chatJson), { status: 200, headers: { "Content-Type": "application/json" } });
           } else {
+            // Keep raw responses SSE, will be translated below in the stream handling branch
             upstreamRes = respRes;
+            // Mark as responses for downstream translation
+            upstreamRes._isResponses = true;
           }
         } else {
           upstreamRes = respRes;
@@ -395,16 +433,14 @@ async function handleProxy(req, res, format) {
         console.log(`[PROXY] responses fallback network error: ${e.message}`);
       }
       if (respRes && respRes.ok) {
-        // Non-stream: translate responses -> chat, stream: passthrough raw SSE (client will handle)
         if (!stream) {
           const txt = await respRes.text();
           const chatJson = responsesToChat(txt, originalModel);
-          upstreamRes = { ok: true, status: 200, headers: respRes.headers, json: async () => chatJson, text: async () => JSON.stringify(chatJson), body: Readable.toWeb(Readable.from([JSON.stringify(chatJson)])) };
-          // Mock minimal fetch Response for downstream handling
           upstreamRes = new Response(JSON.stringify(chatJson), { status: 200, headers: { "Content-Type": "application/json" } });
           console.log(`[PROXY] ✓ responses fallback succeeded for ${originalModel}`);
         } else {
           upstreamRes = respRes;
+          upstreamRes._isResponses = true;
           console.log(`[PROXY] ✓ responses fallback (stream) for ${originalModel}`);
         }
         cachedErrText = null;
@@ -454,6 +490,10 @@ async function handleProxy(req, res, format) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
+        let sourceStream = upstreamRes.body;
+        if (upstreamRes._isResponses) {
+          sourceStream = sourceStream.pipeThrough(createResponsesToChatSSETransformer(originalModel));
+        }
         const transformer = createAnthropicSSETransformer(originalModel, cacheReasoning, (err) => {
           console.log(`[PROXY] ⚠ upstream stream error: ${(err?.message || JSON.stringify(err)).slice(0, 150)}`);
           notifyError("stream-error", `[流中断] ${originalModel}: ${(err?.message || "unknown").slice(0, 120)}`);
@@ -465,7 +505,7 @@ async function handleProxy(req, res, format) {
           });
         });
         const encoderStream = new TextEncoderStream();
-        const webStream = upstreamRes.body
+        const webStream = sourceStream
           .pipeThrough(transformer)
           .pipeThrough(encoderStream);
         const nodeStream = Readable.fromWeb(webStream);
@@ -518,7 +558,12 @@ async function handleProxy(req, res, format) {
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
-        const nodeStream = Readable.fromWeb(upstreamRes.body);
+        let sourceStream = upstreamRes.body;
+        // Translate responses SSE -> chat SSE if needed
+        if (upstreamRes._isResponses) {
+          sourceStream = sourceStream.pipeThrough(createResponsesToChatSSETransformer(originalModel));
+        }
+        const nodeStream = Readable.fromWeb(sourceStream);
         nodeStream.on("data", touch);
         nodeStream.on("end", () => {
           done = true;
