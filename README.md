@@ -54,3 +54,4 @@ curl http://127.0.0.1:4096/v1/models | head
 
 * VLESS: `vless://a29738e5-bee1-c0fc-b484-ae7c49cbc828@sg.yourdomain.com:443?encryption=none&security=tls&type=ws&host=sg.yourdomain.com&sni=sg.yourdomain.com&path=%2Fws-node#Remark`
 * Proxy: `ANTHROPIC_BASE_URL=https://sg.yourdomain.com/v1`  `ANTHROPIC_API_KEY=sk-ant-proxy-...`
+# force redeploy 2026-08-26T11:10:09.9551312+08:00
