@@ -1,12 +1,7 @@
 import { API, DEFAULT_HEADERS } from "./constants.js";
-try {
-  const { Agent, setGlobalDispatcher } = await import("undici");
-  setGlobalDispatcher(new Agent({ keepAliveTimeout: 30000, keepAliveMaxTimeout: 60000, connections: 50 }));
-} catch {}
 import { resolve } from "./mapper.js";
 import { add } from "./logger.js";
 import { Readable } from "stream";
-import { pipeline } from "stream/promises";
 import { writeFile } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -180,7 +175,6 @@ function createResponsesToChatSSETransformer(originalModel) {
     transform(chunk, controller) {
       const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
       buffer += text;
-      if (buffer.length > 256 * 1024) buffer = buffer.slice(-256 * 1024);
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
@@ -259,31 +253,10 @@ async function handleProxy(req, res, format) {
   const originalModel = req.body?.model || "unknown";
 
   let body = { ...req.body };
-  if (typeof body.model === "string") body.model = body.model.replace(/\[\d+[mks]?\]/i, "").trim();
   let resolvedModel = resolve(body.model);
   body.model = resolvedModel;
 
-  const rawBodyLen = req.headers["content-length"] ? parseInt(req.headers["content-length"], 10) : 0;
-  if (rawBodyLen > 5 * 1024 * 1024) {
-    console.log(`[PROXY] reject huge header len ${rawBodyLen}B for ${originalModel}`);
-    return res.status(413).json({ type: "error", error: { type: "request_too_large", message: `Body ${rawBodyLen}B exceeds 5MB, please compact conversation` } });
-  }
-  const bodyBytes = (() => { try { return Buffer.byteLength(JSON.stringify(req.body || {}), "utf8"); } catch { return rawBodyLen; } })();
-  if (bodyBytes > 5 * 1024 * 1024) {
-    console.log(`[PROXY] reject huge body ${bodyBytes}B for ${originalModel} (limit 5MB)`);
-    return res.status(413).json({ type: "error", error: { type: "request_too_large", message: `Body ${bodyBytes}B exceeds 5MB, please compact conversation` } });
-  }
-  const mem = process.memoryUsage();
-  if (mem.heapUsed > 800 * 1024 * 1024) {
-    console.log(`[PROXY] heap high ${Math.round(mem.heapUsed / 1048576)}MB, reject ${originalModel}`);
-    return res.status(503).json({ type: "error", error: { type: "api_error", message: "Proxy heap high, retry after compact" } });
-  }
-
-  if (bodyBytes > 50000) {
-    console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
-  } else {
-    console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
-  }
+  console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false}`);
 
   const stream = body.stream !== false;
 
@@ -294,12 +267,7 @@ async function handleProxy(req, res, format) {
     upstreamBody = { ...body };
   }
   dedupeToolCallIds(upstreamBody);
-  try {
-    upstreamBody = JSON.stringify(upstreamBody);
-  } catch (e) {
-    console.log(`[PROXY] stringify failed ${e.message} for ${originalModel}`);
-    return res.status(413).json({ type: "error", error: { type: "invalid_request_error", message: "Body too large to serialize" } });
-  }
+  upstreamBody = JSON.stringify(upstreamBody);
   const headers = {
     ...DEFAULT_HEADERS,
     "Content-Type": "application/json",
@@ -313,22 +281,13 @@ async function handleProxy(req, res, format) {
   let done = false;
   let resClosed = false;
   let firstByteTimer;
-  const firstByteMs = Math.min(120000, 30000 + Math.floor(upstreamBody.length / 1000) * 400);
-  if (firstByteMs > 30000) console.log(`[PROXY] firstByte ${firstByteMs}ms for ${upstreamBody.length} bytes`);
   const rearmFirstByte = () => {
     clearTimeout(firstByteTimer);
-    firstByteTimer = setTimeout(() => {
-      console.log(`[PROXY] first byte timeout ${firstByteMs}ms for ${originalModel}`);
-      controller.abort();
-    }, firstByteMs);
+    firstByteTimer = setTimeout(() => controller.abort(), 60000);
   };
-  const IDLE_TIMEOUT = 120000;
   const idleTimer = setInterval(() => {
-    if (Date.now() - lastActivity > IDLE_TIMEOUT) {
-      console.log(`[PROXY] idle timeout ${IDLE_TIMEOUT / 1000}s for ${originalModel}`);
-      controller.abort();
-    }
-  }, 15000);
+    if (Date.now() - lastActivity > 300000) controller.abort();
+  }, 30000);
   const stopTimers = () => {
     clearTimeout(firstByteTimer);
     clearInterval(idleTimer);
@@ -640,9 +599,8 @@ async function handleProxy(req, res, format) {
         if (errText === null) {
           try { errText = await upstreamRes.text(); } catch { errText = ""; }
         }
-        const safeBodyPreview = upstreamBody.length > 2000 ? upstreamBody.slice(0, 500) + `...[${upstreamBody.length}B]` : upstreamBody.slice(0, 500);
-        console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${safeBodyPreview}`);
-        if (upstreamRes.status === 400 && upstreamBody.length < 2 * 1024 * 1024) {
+        console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${upstreamBody.slice(0, 500)}`);
+        if (upstreamRes.status === 400) {
           try {
             const payload = JSON.stringify({ status: upstreamRes.status, body: JSON.parse(upstreamBody), error: errText.slice(0, 500) }, null, 2);
             writeFile(path.join(__dirname, "..", "debug-400.json"), payload, () => {});
@@ -721,22 +679,20 @@ async function handleProxy(req, res, format) {
             res.destroy();
             return;
           }
-          try { upstreamRes.body?.cancel?.(); } catch {}
           if (!firstChunk) {
             const model = originalModel || "";
-            try {
-              res.write(`event: message_start\ndata: ${JSON.stringify({
-                type: "message_start",
-                message: { id: "msg_unknown", type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
-              })}\n\n`);
-              res.write(`event: message_delta\ndata: ${JSON.stringify({
-                type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 0, output_tokens: 0 },
-              })}\n\n`);
-            } catch {}
+            res.write(`event: message_start\ndata: ${JSON.stringify({
+              type: "message_start",
+              message: { id: "msg_unknown", type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+            })}\n\n`);
+            res.write(`event: message_delta\ndata: ${JSON.stringify({
+              type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 0, output_tokens: 0 },
+            })}\n\n`);
           }
-          try { res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`); res.end(); } catch { try { res.destroy(); } catch {} }
+          res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
+          res.end();
         });
-        pipeline(nodeStream, res).catch(() => {});
+        nodeStream.pipe(res);
       } else {
         const oaJson = await upstreamRes.json();
         stopTimers();
@@ -773,10 +729,9 @@ async function handleProxy(req, res, format) {
             error: err.message,
           });
           controller.abort();
-          try { upstreamRes.body?.cancel?.(); } catch {}
           if (isAlive() && !res.headersSent) res.destroy();
         });
-        pipeline(nodeStream, res).catch(() => {});
+        nodeStream.pipe(res);
       } else {
         const json = await upstreamRes.json();
         stopTimers();

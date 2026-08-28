@@ -10,31 +10,10 @@ import { getAll, set, remove } from "./src/mapper.js";
 import { getAll as getLogs, clear as clearLogs } from "./src/logger.js";
 import { MODEL_META, getFreeModelScores } from "./src/modelMeta.js";
 import { setNotifyConfig, getNotifyConfig, notifyError, testNotify, getHistory } from "./src/notify.js";
-import { writeHeartbeat, writeCrashReport, readCrashReport, readHeartbeat, clearCrashReport, setLastRequest } from "./src/crash.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SETTINGS_PATH = path.join(__dirname, "config", "settings.json");
-const PID_PATH = path.join(__dirname, "config", "pid.json");
-try {
-  const cur = fs.readFileSync(PID_PATH, "utf-8");
-  const pidData = JSON.parse(cur);
-  if (pidData.pid && pidData.pid !== process.pid) {
-    let alive = false;
-    try { process.kill(pidData.pid, 0); alive = true; } catch {}
-    if (alive) {
-      let hbAge = Infinity;
-      try { const hb = JSON.parse(fs.readFileSync(path.join(__dirname, "config", "heartbeat.json"), "utf-8")); hbAge = Date.now() - hb.time; } catch {}
-      if (hbAge < 30000) { console.error(`[FATAL] 已有实例 PID ${pidData.pid} 仍在运行 (heartbeat ${hbAge}ms)，请先 stop.bat 再启动`); process.exit(1); }
-      else console.error(`[WARN] 旧 PID ${pidData.pid} heartbeat stale ${hbAge}ms，视为僵死，抢占锁`);
-    }
-  }
-} catch {}
-try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() }), { flag: "wx" }); } catch (e) {
-  if (e.code === "EEXIST") { console.error(`[FATAL] pid.json 已被抢占，另一实例正在启动`); process.exit(1); }
-  try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch {}
-}
-process.on("exit", () => { try { const cur = JSON.parse(fs.readFileSync(PID_PATH, "utf-8")); if (cur.pid === process.pid) fs.unlinkSync(PID_PATH); } catch {} });
 let settings = { port: 4096, host: "127.0.0.1" };
 
 try {
@@ -66,8 +45,7 @@ function saveSettings(next) {
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "5mb", verify: (req, res, buf) => { if (buf.length > 5 * 1024 * 1024) throw Object.assign(new Error("Body too large"), { status: 413, statusCode: 413 }); } }));
-app.use(express.urlencoded({ limit: "5mb", extended: true }));
+app.use(express.json({ limit: "10mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // Dashboard under /api/ui so it is reachable via Cloudflare Tunnel rule (/api -> 4096)
@@ -139,14 +117,8 @@ router.post("/messages/count_tokens", (req, res) => {
   res.json({ input_tokens: inputTokens });
 });
 
-router.post("/chat/completions", (req, res) => {
-  setLastRequest({ path: req.path, model: req.body?.model, format: "openai", bodyBytes: JSON.stringify(req.body || {}).length });
-  handleProxy(req, res, "openai");
-});
-router.post("/messages", (req, res) => {
-  setLastRequest({ path: req.path, model: req.body?.model, format: "claude", bodyBytes: JSON.stringify(req.body || {}).length });
-  handleProxy(req, res, "claude");
-});
+router.post("/chat/completions", (req, res) => handleProxy(req, res, "openai"));
+router.post("/messages", (req, res) => handleProxy(req, res, "claude"));
 
 router.get("/organizations", (req, res) => {
   res.json({ data: [{ id: "default", name: "default" }] });
@@ -172,20 +144,7 @@ api.get("/status", (req, res) => {
       useEnvProxy: process.execArgv.includes("--use-env-proxy"),
       httpProxy: process.env.HTTP_PROXY || process.env.HTTPS_PROXY || null,
     },
-    heartbeat: readHeartbeat(),
   });
-});
-api.get("/crash", (req, res) => {
-  const report = readCrashReport();
-  if (!report) return res.json({ crash: null });
-  res.json({ crash: report });
-});
-api.delete("/crash", (req, res) => {
-  clearCrashReport();
-  res.json({ ok: true });
-});
-api.get("/heartbeat", (req, res) => {
-  res.json(readHeartbeat() || { error: "no heartbeat" });
 });
 
 api.get("/logs", (req, res) => res.json(getLogs()));
@@ -259,10 +218,6 @@ const server = app.listen(settings.port, settings.host, () => {
   console.log(`OpenCode Free Proxy running on http://${settings.host}:${settings.port}`);
   console.log(`Dashboard: http://${settings.host}:${settings.port}`);
 });
-server.keepAliveTimeout = 65000;
-server.headersTimeout = 66000;
-server.requestTimeout = 310000;
-server.maxHeadersCount = 20;
 server.on("error", (e) => {
   if (e.code === "EADDRINUSE") {
     console.error(`[FATAL] 端口 ${settings.port} 被占用，请检查是否有其他进程占用该端口或更换端口`);
@@ -271,26 +226,6 @@ server.on("error", (e) => {
   throw e;
 });
 
-setInterval(writeHeartbeat, 10000).unref();
-writeHeartbeat();
-setInterval(() => {
-  const m = process.memoryUsage();
-  try { fs.appendFileSync(path.join(__dirname, "config", "heap.csv"), `${Date.now()},${m.heapUsed},${m.rss},${m.heapTotal},${m.external}\n`); } catch {}
-  if (m.heapUsed > 600 * 1024 * 1024) {
-    const r = writeCrashReport(new Error(`heap warn ${m.heapUsed}`), "heap-warn");
-    console.error(`[HEAP-WARN] ${m.heapUsed} lastReq ${r.lastReq?.bodyBytes || 0}B`);
-  }
-}, 5000).unref();
-process.on("exit", (code) => {
-  try { fs.appendFileSync(path.join(__dirname, "config", "exit.log"), JSON.stringify({ time: new Date().toISOString(), code, pid: process.pid, heap: process.memoryUsage(), lastReq: (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "config", "heartbeat.json"), "utf-8")).lastReq; } catch { return null; } })() }) + "\n"); } catch {}
-});
-process.on("SIGBREAK", () => {
-  const r = writeCrashReport(new Error("SIGBREAK"), "SIGBREAK");
-  try { notifyError("fatal", `[崩溃] SIGBREAK heap ${r.memory.heapUsed} lastReq ${r.lastReq?.bodyBytes || 0}B`); } catch {}
-  shutdownAndExit(1);
-});
-process.on("beforeExit", (code) => { console.error(`[beforeExit] ${code}`); });
-
 function shutdownAndExit(code = 1) {
   console.error(`[FATAL] unhandled error, shutting down gracefully`);
   try { server.close(() => process.exit(code)); } catch { process.exit(code); }
@@ -298,15 +233,10 @@ function shutdownAndExit(code = 1) {
 }
 process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err);
-  const report = writeCrashReport(err, "uncaughtException");
-  try { notifyError("fatal", `[崩溃] uncaughtException: ${(err?.message || String(err)).slice(0, 120)} | lastReq ${report.lastReq?.model || "?"} ${report.lastReq?.bodyBytes || 0}B`); } catch {}
   shutdownAndExit(1);
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[unhandledRejection]", reason);
-  const err = reason instanceof Error ? reason : new Error(String(reason));
-  const report = writeCrashReport(err, "unhandledRejection");
-  try { notifyError("fatal", `[崩溃] unhandledRejection: ${(err?.message || String(err)).slice(0, 120)} | lastReq ${report.lastReq?.model || "?"} ${report.lastReq?.bodyBytes || 0}B`); } catch {}
   shutdownAndExit(1);
 });
 process.on("SIGINT", () => { server.close(() => process.exit(0)); });
