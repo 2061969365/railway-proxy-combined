@@ -15,6 +15,15 @@ import { writeHeartbeat, writeCrashReport, readCrashReport, readHeartbeat, clear
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const SETTINGS_PATH = path.join(__dirname, "config", "settings.json");
+const PID_PATH = path.join(__dirname, "config", "pid.json");
+try {
+  const pidData = JSON.parse(fs.readFileSync(PID_PATH, "utf-8"));
+  if (pidData.pid && pidData.pid !== process.pid) {
+    try { process.kill(pidData.pid, 0); console.error(`[FATAL] 已有实例 PID ${pidData.pid} 仍在运行，请先 stop.bat 再启动`); process.exit(1); } catch {}
+  }
+} catch {}
+try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch {}
+process.on("exit", () => { try { const cur = JSON.parse(fs.readFileSync(PID_PATH, "utf-8")); if (cur.pid === process.pid) fs.unlinkSync(PID_PATH); } catch {} });
 let settings = { port: 4096, host: "127.0.0.1" };
 
 try {

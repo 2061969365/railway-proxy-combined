@@ -257,7 +257,12 @@ async function handleProxy(req, res, format) {
   let resolvedModel = resolve(body.model);
   body.model = resolvedModel;
 
-  const bodyBytes = JSON.stringify(req.body || {}).length;
+  const rawBodyLen = req.headers["content-length"] ? parseInt(req.headers["content-length"], 10) : 0;
+  if (rawBodyLen > 5 * 1024 * 1024) {
+    console.log(`[PROXY] reject huge header len ${rawBodyLen}B for ${originalModel}`);
+    return res.status(413).json({ type: "error", error: { type: "request_too_large", message: `Body ${rawBodyLen}B exceeds 5MB, please compact conversation` } });
+  }
+  const bodyBytes = (() => { try { return Buffer.byteLength(JSON.stringify(req.body || {}), "utf8"); } catch { return rawBodyLen; } })();
   if (bodyBytes > 5 * 1024 * 1024) {
     console.log(`[PROXY] reject huge body ${bodyBytes}B for ${originalModel} (limit 5MB)`);
     return res.status(413).json({ type: "error", error: { type: "request_too_large", message: `Body ${bodyBytes}B exceeds 5MB, please compact conversation` } });
@@ -268,7 +273,11 @@ async function handleProxy(req, res, format) {
     return res.status(503).json({ type: "error", error: { type: "api_error", message: "Proxy heap high, retry after compact" } });
   }
 
-  console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
+  if (bodyBytes > 50000) {
+    console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
+  } else {
+    console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
+  }
 
   const stream = body.stream !== false;
 
@@ -307,7 +316,7 @@ async function handleProxy(req, res, format) {
       controller.abort();
     }, firstByteMs);
   };
-  const IDLE_TIMEOUT = 600000;
+  const IDLE_TIMEOUT = 300000;
   const idleTimer = setInterval(() => {
     if (Date.now() - lastActivity > IDLE_TIMEOUT) {
       console.log(`[PROXY] idle timeout ${IDLE_TIMEOUT / 1000}s for ${originalModel}`);

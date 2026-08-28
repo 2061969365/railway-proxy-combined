@@ -248,6 +248,7 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
     nextBlockIndex: 0,
     activeType: null,
     activeIndex: -1,
+    activeToolIndex: -1,
     tools: new Map(),
     stopReason: "end_turn",
     usage: undefined,
@@ -266,6 +267,7 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
     stopActive(controller);
     st.activeIndex = st.nextBlockIndex++;
     st.activeType = "thinking";
+    st.activeToolIndex = -1;
     controller.enqueue(formatSSE("content_block_start", {
       index: st.activeIndex,
       content_block: { type: "thinking", thinking: "" },
@@ -276,9 +278,33 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
     stopActive(controller);
     st.activeIndex = st.nextBlockIndex++;
     st.activeType = "text";
+    st.activeToolIndex = -1;
     controller.enqueue(formatSSE("content_block_start", {
       index: st.activeIndex,
       content_block: { type: "text", text: "" },
+    }));
+  }
+
+  function startTool(controller, tool) {
+    stopActive(controller);
+    st.activeIndex = st.nextBlockIndex++;
+    st.activeType = "tool";
+    st.activeToolIndex = tool.idx;
+    tool.emitted = true;
+    controller.enqueue(formatSSE("content_block_start", {
+      index: st.activeIndex,
+      content_block: { type: "tool_use", id: tool.id, name: tool.name, input: {} },
+    }));
+  }
+
+  function emitToolDelta(controller, tool, partial, idx) {
+    if (st.activeType !== "tool" || st.activeToolIndex !== idx) {
+      if (st.activeType !== null) stopActive(controller);
+      startTool(controller, tool);
+    }
+    controller.enqueue(formatSSE("content_block_delta", {
+      index: st.activeIndex,
+      delta: { type: "input_json_delta", partial_json: partial },
     }));
   }
 
@@ -303,8 +329,11 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
     stopActive(controller);
     if (st.tools.size > 0 && st.stopReason !== "max_tokens") {
       const idxs = [...st.tools.keys()].sort((a, b) => a - b);
+      let hasPending = false;
       for (const idx of idxs) {
         const tool = st.tools.get(idx);
+        if (tool.emitted) continue;
+        hasPending = true;
         const blockIndex = st.nextBlockIndex++;
         controller.enqueue(formatSSE("content_block_start", {
           index: blockIndex,
@@ -316,7 +345,7 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
         }));
         controller.enqueue(formatSSE("content_block_stop", { index: blockIndex }));
       }
-      st.stopReason = "tool_use";
+      if (hasPending || st.tools.size > 0) st.stopReason = "tool_use";
     }
     const payload = {
       delta: { stop_reason: st.stopReason, stop_sequence: null },
@@ -408,12 +437,19 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
         const idx = tc.index ?? 0;
         let tool = st.tools.get(idx);
         if (!tool) {
-          tool = { id: tc.id || `toolu_${idx}`, name: tc.function?.name || "", args: "" };
+          tool = { id: tc.id || `toolu_${idx}`, name: tc.function?.name || "", args: "", idx };
           st.tools.set(idx, tool);
         }
         if (tc.id) tool.id = tc.id;
         if (tc.function?.name) tool.name = tc.function?.name;
-        if (tc.function?.arguments) tool.args += tc.function.arguments;
+        if (tc.function?.arguments) {
+          tool.args += tc.function.arguments;
+          emitToolDelta(controller, tool, tc.function.arguments, idx);
+        } else if (tc.id || tc.function?.name) {
+          if (st.activeType !== "tool" || st.activeToolIndex !== idx) {
+            startTool(controller, tool);
+          }
+        }
       }
     }
 
