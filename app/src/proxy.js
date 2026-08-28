@@ -1,7 +1,12 @@
 import { API, DEFAULT_HEADERS } from "./constants.js";
+try {
+  const { Agent, setGlobalDispatcher } = await import("undici");
+  setGlobalDispatcher(new Agent({ keepAliveTimeout: 30000, keepAliveMaxTimeout: 60000, connections: 50 }));
+} catch {}
 import { resolve } from "./mapper.js";
 import { add } from "./logger.js";
 import { Readable } from "stream";
+import { pipeline } from "stream/promises";
 import { writeFile } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -175,6 +180,7 @@ function createResponsesToChatSSETransformer(originalModel) {
     transform(chunk, controller) {
       const text = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
       buffer += text;
+      if (buffer.length > 256 * 1024) buffer = buffer.slice(-256 * 1024);
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
       for (const line of lines) {
@@ -307,8 +313,8 @@ async function handleProxy(req, res, format) {
   let done = false;
   let resClosed = false;
   let firstByteTimer;
-  const firstByteMs = Math.min(300000, 60000 + Math.floor(upstreamBody.length / 1000) * 800);
-  if (firstByteMs > 60000) console.log(`[PROXY] 1M context firstByte ${firstByteMs}ms for ${upstreamBody.length} bytes`);
+  const firstByteMs = Math.min(120000, 30000 + Math.floor(upstreamBody.length / 1000) * 400);
+  if (firstByteMs > 30000) console.log(`[PROXY] firstByte ${firstByteMs}ms for ${upstreamBody.length} bytes`);
   const rearmFirstByte = () => {
     clearTimeout(firstByteTimer);
     firstByteTimer = setTimeout(() => {
@@ -316,13 +322,13 @@ async function handleProxy(req, res, format) {
       controller.abort();
     }, firstByteMs);
   };
-  const IDLE_TIMEOUT = 300000;
+  const IDLE_TIMEOUT = 120000;
   const idleTimer = setInterval(() => {
     if (Date.now() - lastActivity > IDLE_TIMEOUT) {
       console.log(`[PROXY] idle timeout ${IDLE_TIMEOUT / 1000}s for ${originalModel}`);
       controller.abort();
     }
-  }, 30000);
+  }, 15000);
   const stopTimers = () => {
     clearTimeout(firstByteTimer);
     clearInterval(idleTimer);
@@ -715,20 +721,22 @@ async function handleProxy(req, res, format) {
             res.destroy();
             return;
           }
+          try { upstreamRes.body?.cancel?.(); } catch {}
           if (!firstChunk) {
             const model = originalModel || "";
-            res.write(`event: message_start\ndata: ${JSON.stringify({
-              type: "message_start",
-              message: { id: "msg_unknown", type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
-            })}\n\n`);
-            res.write(`event: message_delta\ndata: ${JSON.stringify({
-              type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 0, output_tokens: 0 },
-            })}\n\n`);
+            try {
+              res.write(`event: message_start\ndata: ${JSON.stringify({
+                type: "message_start",
+                message: { id: "msg_unknown", type: "message", role: "assistant", content: [], model, stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } },
+              })}\n\n`);
+              res.write(`event: message_delta\ndata: ${JSON.stringify({
+                type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { input_tokens: 0, output_tokens: 0 },
+              })}\n\n`);
+            } catch {}
           }
-          res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`);
-          res.end();
+          try { res.write(`event: message_stop\ndata: {"type":"message_stop"}\n\n`); res.end(); } catch { try { res.destroy(); } catch {} }
         });
-        nodeStream.pipe(res);
+        pipeline(nodeStream, res).catch(() => {});
       } else {
         const oaJson = await upstreamRes.json();
         stopTimers();
@@ -765,9 +773,10 @@ async function handleProxy(req, res, format) {
             error: err.message,
           });
           controller.abort();
+          try { upstreamRes.body?.cancel?.(); } catch {}
           if (isAlive() && !res.headersSent) res.destroy();
         });
-        nodeStream.pipe(res);
+        pipeline(nodeStream, res).catch(() => {});
       } else {
         const json = await upstreamRes.json();
         stopTimers();

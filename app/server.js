@@ -66,8 +66,8 @@ function saveSettings(next) {
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "50mb" }));
-app.use(express.urlencoded({ limit: "50mb", extended: true }));
+app.use(express.json({ limit: "5mb", verify: (req, res, buf) => { if (buf.length > 5 * 1024 * 1024) throw Object.assign(new Error("Body too large"), { status: 413, statusCode: 413 }); } }));
+app.use(express.urlencoded({ limit: "5mb", extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // Dashboard under /api/ui so it is reachable via Cloudflare Tunnel rule (/api -> 4096)
@@ -259,6 +259,10 @@ const server = app.listen(settings.port, settings.host, () => {
   console.log(`OpenCode Free Proxy running on http://${settings.host}:${settings.port}`);
   console.log(`Dashboard: http://${settings.host}:${settings.port}`);
 });
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
+server.requestTimeout = 310000;
+server.maxHeadersCount = 20;
 server.on("error", (e) => {
   if (e.code === "EADDRINUSE") {
     console.error(`[FATAL] 端口 ${settings.port} 被占用，请检查是否有其他进程占用该端口或更换端口`);

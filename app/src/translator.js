@@ -472,6 +472,10 @@ function createAnthropicSSETransformer(originalModel, onTurnComplete, onError) {
     transform(chunk, controller) {
       const text = decoder.decode(chunk, { stream: true });
       buffer += text;
+      if (buffer.length > 256 * 1024) {
+        buffer = buffer.slice(-256 * 1024);
+        console.error("[TRANS] buffer capped 256KB");
+      }
       const lines = buffer.split("\n");
       buffer = lines.pop() || "";
 
