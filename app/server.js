@@ -17,12 +17,23 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SETTINGS_PATH = path.join(__dirname, "config", "settings.json");
 const PID_PATH = path.join(__dirname, "config", "pid.json");
 try {
-  const pidData = JSON.parse(fs.readFileSync(PID_PATH, "utf-8"));
+  const cur = fs.readFileSync(PID_PATH, "utf-8");
+  const pidData = JSON.parse(cur);
   if (pidData.pid && pidData.pid !== process.pid) {
-    try { process.kill(pidData.pid, 0); console.error(`[FATAL] 已有实例 PID ${pidData.pid} 仍在运行，请先 stop.bat 再启动`); process.exit(1); } catch {}
+    let alive = false;
+    try { process.kill(pidData.pid, 0); alive = true; } catch {}
+    if (alive) {
+      let hbAge = Infinity;
+      try { const hb = JSON.parse(fs.readFileSync(path.join(__dirname, "config", "heartbeat.json"), "utf-8")); hbAge = Date.now() - hb.time; } catch {}
+      if (hbAge < 30000) { console.error(`[FATAL] 已有实例 PID ${pidData.pid} 仍在运行 (heartbeat ${hbAge}ms)，请先 stop.bat 再启动`); process.exit(1); }
+      else console.error(`[WARN] 旧 PID ${pidData.pid} heartbeat stale ${hbAge}ms，视为僵死，抢占锁`);
+    }
   }
 } catch {}
-try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch {}
+try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() }), { flag: "wx" }); } catch (e) {
+  if (e.code === "EEXIST") { console.error(`[FATAL] pid.json 已被抢占，另一实例正在启动`); process.exit(1); }
+  try { fs.writeFileSync(PID_PATH, JSON.stringify({ pid: process.pid, time: Date.now() })); } catch {}
+}
 process.on("exit", () => { try { const cur = JSON.parse(fs.readFileSync(PID_PATH, "utf-8")); if (cur.pid === process.pid) fs.unlinkSync(PID_PATH); } catch {} });
 let settings = { port: 4096, host: "127.0.0.1" };
 
@@ -258,6 +269,23 @@ server.on("error", (e) => {
 
 setInterval(writeHeartbeat, 10000).unref();
 writeHeartbeat();
+setInterval(() => {
+  const m = process.memoryUsage();
+  try { fs.appendFileSync(path.join(__dirname, "config", "heap.csv"), `${Date.now()},${m.heapUsed},${m.rss},${m.heapTotal},${m.external}\n`); } catch {}
+  if (m.heapUsed > 600 * 1024 * 1024) {
+    const r = writeCrashReport(new Error(`heap warn ${m.heapUsed}`), "heap-warn");
+    console.error(`[HEAP-WARN] ${m.heapUsed} lastReq ${r.lastReq?.bodyBytes || 0}B`);
+  }
+}, 5000).unref();
+process.on("exit", (code) => {
+  try { fs.appendFileSync(path.join(__dirname, "config", "exit.log"), JSON.stringify({ time: new Date().toISOString(), code, pid: process.pid, heap: process.memoryUsage(), lastReq: (() => { try { return JSON.parse(fs.readFileSync(path.join(__dirname, "config", "heartbeat.json"), "utf-8")).lastReq; } catch { return null; } })() }) + "\n"); } catch {}
+});
+process.on("SIGBREAK", () => {
+  const r = writeCrashReport(new Error("SIGBREAK"), "SIGBREAK");
+  try { notifyError("fatal", `[崩溃] SIGBREAK heap ${r.memory.heapUsed} lastReq ${r.lastReq?.bodyBytes || 0}B`); } catch {}
+  shutdownAndExit(1);
+});
+process.on("beforeExit", (code) => { console.error(`[beforeExit] ${code}`); });
 
 function shutdownAndExit(code = 1) {
   console.error(`[FATAL] unhandled error, shutting down gracefully`);
