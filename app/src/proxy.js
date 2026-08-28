@@ -2,72 +2,31 @@ import { API, DEFAULT_HEADERS } from "./constants.js";
 import { resolve } from "./mapper.js";
 import { add } from "./logger.js";
 import { Readable } from "stream";
-import { readFileSync, writeFileSync, mkdirSync, writeFile } from "fs";
+import { writeFile } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { LRUCache } from "lru-cache";
 import { anthropicToOpenAI, openaiToAnthropic, createAnthropicSSETransformer } from "./translator.js";
 import { notifyError } from "./notify.js";
+import { isBreakerOpen, openBreaker, getBreakerTTL } from "./cache.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REASONING_CACHE_FILE = path.join(__dirname, "..", "reasoning-cache.json");
-const REASONING_CACHE_MAX = 2000;
 
-const reasoningCache = new Map();
-let reasoningDirty = false;
-let reasoningSaveTimer = null;
-
-function loadReasoningCache() {
-  try {
-    const raw = readFileSync(REASONING_CACHE_FILE, "utf8");
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object") {
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof v === "string") reasoningCache.set(k, v);
-      }
-    }
-    console.log(`[PROXY] loaded ${reasoningCache.size} reasoning cache entries`);
-  } catch {
-    console.log("[PROXY] no reasoning cache file, starting fresh");
-  }
-}
-
-function saveReasoningCache() {
-  if (!reasoningDirty) return;
-  reasoningDirty = false;
-  try {
-    const obj = {};
-    for (const [k, v] of reasoningCache) obj[k] = v;
-    writeFileSync(REASONING_CACHE_FILE, JSON.stringify(obj));
-    console.log(`[PROXY] saved ${reasoningCache.size} reasoning cache entries`);
-  } catch (e) {
-    console.log(`[PROXY] failed to save reasoning cache: ${e.message}`);
-  }
-}
-
-function scheduleReasoningSave() {
-  reasoningDirty = true;
-  clearTimeout(reasoningSaveTimer);
-  reasoningSaveTimer = setTimeout(saveReasoningCache, 2000);
-}
+const reasoningCache = new LRUCache({
+  max: 500,
+  maxSize: 4 * 1024 * 1024,
+  sizeCalculation: (v) => (typeof v === "string" ? v.length : 0),
+  ttl: 60 * 60 * 1000,
+});
 
 function cacheReasoning(reasoning, toolIds) {
   if (!reasoning || !Array.isArray(toolIds) || !toolIds.length) return;
+  const truncated = reasoning.length > 2000 ? reasoning.slice(0, 2000) : reasoning;
   for (const id of toolIds) {
     if (!id) continue;
-    reasoningCache.set(id, reasoning);
+    reasoningCache.set(id, truncated);
   }
-  while (reasoningCache.size > REASONING_CACHE_MAX) {
-    const oldest = reasoningCache.keys().next().value;
-    if (oldest === undefined) break;
-    reasoningCache.delete(oldest);
-  }
-  scheduleReasoningSave();
 }
-
-loadReasoningCache();
-process.on("SIGINT", () => { saveReasoningCache(); process.exit(0); });
-process.on("SIGTERM", () => { saveReasoningCache(); process.exit(0); });
-process.on("exit", () => saveReasoningCache());
 
 function dedupeToolCallIds(body) {
   const messages = body?.messages;
@@ -294,10 +253,22 @@ async function handleProxy(req, res, format) {
   const originalModel = req.body?.model || "unknown";
 
   let body = { ...req.body };
+  if (typeof body.model === "string") body.model = body.model.replace(/\[\d+[mks]?\]/i, "").trim();
   let resolvedModel = resolve(body.model);
   body.model = resolvedModel;
 
-  console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false}`);
+  const bodyBytes = JSON.stringify(req.body || {}).length;
+  if (bodyBytes > 5 * 1024 * 1024) {
+    console.log(`[PROXY] reject huge body ${bodyBytes}B for ${originalModel} (limit 5MB)`);
+    return res.status(413).json({ type: "error", error: { type: "request_too_large", message: `Body ${bodyBytes}B exceeds 5MB, please compact conversation` } });
+  }
+  const mem = process.memoryUsage();
+  if (mem.heapUsed > 800 * 1024 * 1024) {
+    console.log(`[PROXY] heap high ${Math.round(mem.heapUsed / 1048576)}MB, reject ${originalModel}`);
+    return res.status(503).json({ type: "error", error: { type: "api_error", message: "Proxy heap high, retry after compact" } });
+  }
+
+  console.log(`[PROXY] ${originalModel} → ${resolvedModel} | ${format} | stream=${body.stream !== false} body=${bodyBytes}B heap=${Math.round(mem.heapUsed / 1048576)}MB`);
 
   const stream = body.stream !== false;
 
@@ -308,7 +279,12 @@ async function handleProxy(req, res, format) {
     upstreamBody = { ...body };
   }
   dedupeToolCallIds(upstreamBody);
-  upstreamBody = JSON.stringify(upstreamBody);
+  try {
+    upstreamBody = JSON.stringify(upstreamBody);
+  } catch (e) {
+    console.log(`[PROXY] stringify failed ${e.message} for ${originalModel}`);
+    return res.status(413).json({ type: "error", error: { type: "invalid_request_error", message: "Body too large to serialize" } });
+  }
   const headers = {
     ...DEFAULT_HEADERS,
     "Content-Type": "application/json",
@@ -322,12 +298,21 @@ async function handleProxy(req, res, format) {
   let done = false;
   let resClosed = false;
   let firstByteTimer;
+  const firstByteMs = Math.min(300000, 60000 + Math.floor(upstreamBody.length / 1000) * 800);
+  if (firstByteMs > 60000) console.log(`[PROXY] 1M context firstByte ${firstByteMs}ms for ${upstreamBody.length} bytes`);
   const rearmFirstByte = () => {
     clearTimeout(firstByteTimer);
-    firstByteTimer = setTimeout(() => controller.abort(), 60000);
+    firstByteTimer = setTimeout(() => {
+      console.log(`[PROXY] first byte timeout ${firstByteMs}ms for ${originalModel}`);
+      controller.abort();
+    }, firstByteMs);
   };
+  const IDLE_TIMEOUT = 600000;
   const idleTimer = setInterval(() => {
-    if (Date.now() - lastActivity > 300000) controller.abort();
+    if (Date.now() - lastActivity > IDLE_TIMEOUT) {
+      console.log(`[PROXY] idle timeout ${IDLE_TIMEOUT / 1000}s for ${originalModel}`);
+      controller.abort();
+    }
   }, 30000);
   const stopTimers = () => {
     clearTimeout(firstByteTimer);
@@ -386,7 +371,17 @@ async function handleProxy(req, res, format) {
         continue;
       }
       clearTimeout(firstByteTimer);
-      if (res.ok || !RETRYABLE.includes(res.status) || attempt >= 4) return res;
+      if (res.ok || !RETRYABLE.includes(res.status) || attempt >= 4) {
+        if (res && res.status === 429) {
+          const ra = parseInt(res.headers.get("retry-after") || "0", 10);
+          openBreaker("upstream:429", ra ? ra * 1000 : 60 * 1000);
+        }
+        return res;
+      }
+      if (res.status === 429) {
+        const ra = parseInt(res.headers.get("retry-after") || "0", 10);
+        openBreaker("upstream:429", ra ? ra * 1000 : 60 * 1000);
+      }
       try { await res.body?.cancel?.(); } catch {}
       let delay;
       if (res.status === 429) {
@@ -399,6 +394,23 @@ async function handleProxy(req, res, format) {
       await sleep(delay);
     }
   };
+
+  if (isBreakerOpen("upstream:429")) {
+    const ttl = getBreakerTTL("upstream:429");
+    const msg = `Upstream rate limited, breaker open for ${Math.ceil(ttl / 1000)}s`;
+    console.log(`[PROXY] breaker open skip ${originalModel} ttl=${ttl}ms`);
+    add({
+      method: req.method, path: req.path,
+      model: originalModel, mappedTo: body.model,
+      status: 429, duration: Date.now() - start,
+      error: msg,
+    });
+    if (isAlive()) {
+      res.setHeader("Retry-After", String(Math.ceil(ttl / 1000)));
+      res.status(429).json(normalizeError(format, 429, msg));
+    }
+    return;
+  }
 
   try {
     // Direct routing for known responses models (avoid 4x retry delay)
@@ -613,14 +625,17 @@ async function handleProxy(req, res, format) {
         if (errText === null) {
           try { errText = await upstreamRes.text(); } catch { errText = ""; }
         }
-        console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${upstreamBody.slice(0, 500)}`);
-        if (upstreamRes.status === 400) {
+        const safeBodyPreview = upstreamBody.length > 2000 ? upstreamBody.slice(0, 500) + `...[${upstreamBody.length}B]` : upstreamBody.slice(0, 500);
+        console.log(`[PROXY] ✗ upstream ${upstreamRes.status}: ${errText.slice(0, 500)} | body: ${safeBodyPreview}`);
+        if (upstreamRes.status === 400 && upstreamBody.length < 2 * 1024 * 1024) {
           try {
             const payload = JSON.stringify({ status: upstreamRes.status, body: JSON.parse(upstreamBody), error: errText.slice(0, 500) }, null, 2);
             writeFile(path.join(__dirname, "..", "debug-400.json"), payload, () => {});
           } catch {}
         }
         if (upstreamRes.status === 429) {
+          const ra = parseInt(upstreamRes.headers.get("retry-after") || "0", 10);
+          openBreaker("upstream:429", ra ? ra * 1000 : 60 * 1000);
           notifyError("rate-limit", `[限流] ${originalModel} 上游 429: ${errText.slice(0, 120)}`);
         } else if (upstreamRes.status >= 500) {
           notifyError(`upstream-${upstreamRes.status}`, `[上游 ${upstreamRes.status}] ${originalModel}: ${errText.slice(0, 120)}`);

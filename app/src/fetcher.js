@@ -1,6 +1,7 @@
 ﻿import { API, DEFAULT_HEADERS } from "./constants.js";
+import { getModelsCached, isBreakerOpen } from "./cache.js";
 
-async function fetchModels() {
+async function _fetchModelsOnce() {
   try {
     if (!process.env.HTTPS_PROXY && !process.env.HTTP_PROXY && !process.execArgv.includes("--use-env-proxy")) {
       console.warn("[WARN] fetchModels 未检测到代理，可能无法获取上游模型列表");
@@ -19,6 +20,19 @@ async function fetchModels() {
     console.error("Failed to fetch models:", err.message);
     return null;
   }
+}
+
+async function fetchModels() {
+  if (isBreakerOpen("models:429")) {
+    console.warn("[CACHE] models breaker open, skip upstream");
+    return null;
+  }
+  const data = await getModelsCached(_fetchModelsOnce);
+  if (data === null) {
+    const { openBreaker } = await import("./cache.js");
+    openBreaker("models:429", 30 * 1000);
+  }
+  return data;
 }
 
 export { fetchModels };

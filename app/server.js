@@ -10,6 +10,7 @@ import { getAll, set, remove } from "./src/mapper.js";
 import { getAll as getLogs, clear as clearLogs } from "./src/logger.js";
 import { MODEL_META, getFreeModelScores } from "./src/modelMeta.js";
 import { setNotifyConfig, getNotifyConfig, notifyError, testNotify, getHistory } from "./src/notify.js";
+import { writeHeartbeat, writeCrashReport, readCrashReport, readHeartbeat, clearCrashReport, setLastRequest } from "./src/crash.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +46,8 @@ function saveSettings(next) {
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // Dashboard under /api/ui so it is reachable via Cloudflare Tunnel rule (/api -> 4096)
@@ -117,8 +119,14 @@ router.post("/messages/count_tokens", (req, res) => {
   res.json({ input_tokens: inputTokens });
 });
 
-router.post("/chat/completions", (req, res) => handleProxy(req, res, "openai"));
-router.post("/messages", (req, res) => handleProxy(req, res, "claude"));
+router.post("/chat/completions", (req, res) => {
+  setLastRequest({ path: req.path, model: req.body?.model, format: "openai", bodyBytes: JSON.stringify(req.body || {}).length });
+  handleProxy(req, res, "openai");
+});
+router.post("/messages", (req, res) => {
+  setLastRequest({ path: req.path, model: req.body?.model, format: "claude", bodyBytes: JSON.stringify(req.body || {}).length });
+  handleProxy(req, res, "claude");
+});
 
 router.get("/organizations", (req, res) => {
   res.json({ data: [{ id: "default", name: "default" }] });
@@ -144,7 +152,20 @@ api.get("/status", (req, res) => {
       useEnvProxy: process.execArgv.includes("--use-env-proxy"),
       httpProxy: process.env.HTTP_PROXY || process.env.HTTPS_PROXY || null,
     },
+    heartbeat: readHeartbeat(),
   });
+});
+api.get("/crash", (req, res) => {
+  const report = readCrashReport();
+  if (!report) return res.json({ crash: null });
+  res.json({ crash: report });
+});
+api.delete("/crash", (req, res) => {
+  clearCrashReport();
+  res.json({ ok: true });
+});
+api.get("/heartbeat", (req, res) => {
+  res.json(readHeartbeat() || { error: "no heartbeat" });
 });
 
 api.get("/logs", (req, res) => res.json(getLogs()));
@@ -225,3 +246,27 @@ server.on("error", (e) => {
   }
   throw e;
 });
+
+setInterval(writeHeartbeat, 10000).unref();
+writeHeartbeat();
+
+function shutdownAndExit(code = 1) {
+  console.error(`[FATAL] unhandled error, shutting down gracefully`);
+  try { server.close(() => process.exit(code)); } catch { process.exit(code); }
+  setTimeout(() => process.exit(code), 5000).unref();
+}
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err);
+  const report = writeCrashReport(err, "uncaughtException");
+  try { notifyError("fatal", `[崩溃] uncaughtException: ${(err?.message || String(err)).slice(0, 120)} | lastReq ${report.lastReq?.model || "?"} ${report.lastReq?.bodyBytes || 0}B`); } catch {}
+  shutdownAndExit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason);
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  const report = writeCrashReport(err, "unhandledRejection");
+  try { notifyError("fatal", `[崩溃] unhandledRejection: ${(err?.message || String(err)).slice(0, 120)} | lastReq ${report.lastReq?.model || "?"} ${report.lastReq?.bodyBytes || 0}B`); } catch {}
+  shutdownAndExit(1);
+});
+process.on("SIGINT", () => { server.close(() => process.exit(0)); });
+process.on("SIGTERM", () => { server.close(() => process.exit(0)); });

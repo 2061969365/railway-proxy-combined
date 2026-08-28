@@ -1,4 +1,4 @@
-﻿{
+{
   "name": "opencode-free-proxy",
   "version": "1.0.0",
   "description": "Standalone proxy for OpenCode Free API with web dashboard and model mapping",
@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "express": "^4.21.0"
+    "express": "^4.21.0",
+    "lru-cache": "^11.5.2"
   }
 }
