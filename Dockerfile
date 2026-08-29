@@ -1,35 +1,32 @@
 # syntax=docker/dockerfile:1
 FROM teddysun/xray:latest AS xray-source
 FROM cloudflare/cloudflared:latest AS cf-source
-FROM node:22-alpine
+FROM debian:bookworm-slim
 
-RUN apk add --no-cache bash curl busybox-extras unzip socat
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash curl busybox unzip socat ca-certificates libssl3 net-tools \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xray-source /usr/bin/xray /usr/bin/xray
 COPY --from=cf-source /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 
 WORKDIR /app
 
-# Install proxy deps (use cache)
-COPY app/package.json app/package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+# Copy CC Switch native proxy binary
+COPY cc-switch-server /usr/local/bin/cc-switch-server
 
-# Copy proxy source
-COPY app/server.js ./server.js
-COPY app/src ./src
-COPY app/public ./public
-COPY app/config ./config
-
-# Copy Xray assets
+# Copy Xray & disguise assets
 COPY config.json ./config.xray.json
 COPY www ./www
-
-# Entrypoint
 COPY start.sh ./start.sh
-RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh \
- && touch reasoning-cache.json debug-400.json || true
 
-# Railway injects $PORT (set to 3000 in dashboard), socat forwards $PORT -> 4096
+RUN sed -i 's/\r$//' /app/start.sh \
+ && chmod +x /app/start.sh /usr/local/bin/cc-switch-server
+
+# Ports:
+# 4096: CC Switch AI API Proxy (Claude / OpenAI native format converter)
+# 8080: Xray VLESS Websocket
+# 8081: httpd static disguise page
 EXPOSE 4096 8080 8081
 
 ENTRYPOINT ["/app/start.sh"]

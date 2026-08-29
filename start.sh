@@ -24,27 +24,7 @@ if [ -f /tmp/index.html ]; then
   cp /tmp/index.html /app/www/index.html
 fi
 
-# === 3. 兼容 Proxy 配置 (host/notify) - 保持 4096 固定，不跟随 Railway PORT ===
-node -e "
-const fs=require('fs');
-const p='/app/config/settings.json';
-try{
-  const j=JSON.parse(fs.readFileSync(p,'utf8'));
-  let ch=false;
-  if(j.host==='127.0.0.1'){ j.host='0.0.0.0'; ch=true; console.log('[proxy] host 127.0.0.1 -> 0.0.0.0'); }
-  if(j.notify && (j.notify.enabled!==false || (j.notify.exe && j.notify.exe!==''))){
-    j.notify.enabled=false; j.notify.exe=''; ch=true; console.log('[proxy] notify 已禁用 (容器环境)');
-  }
-  // 强制保持 4096，避免 Railway PORT 覆盖导致 Tunnel 502
-  if(j.port!==4096){
-    console.log('[proxy] 强制 port 4096 (原 '+j.port+' -> 4096)，忽略 Railway PORT='+ (process.env.PORT||'<empty>'));
-    j.port=4096; ch=true;
-  }
-  if(ch) fs.writeFileSync(p, JSON.stringify(j,null,2));
-}catch(e){ console.log('[proxy] settings patch 跳过:', e.message); }
-"
-
-# === 4. 启动各服务 ===
+# === 3. 启动各后台服务 ===
 echo "[init] 启动 busybox httpd (8081)..."
 httpd -f -p 8081 -h /app/www &
 HTTP_PID=$!
@@ -60,17 +40,17 @@ else
   echo "[debug] Xray PID=$XRAY_PID 已启动"
 fi
 
-echo "[init] 启动 opencode-free-proxy (固定 4096)..."
-# Railway 版无需代理，直连 opencode.ai，移除 --use-env-proxy (Node20 不支持)
-node server.js > /tmp/proxy.log 2>&1 &
+echo "[init] 启动 CC Switch 原生代理引擎 (监听 4096)..."
+PORT=4096 HOST=0.0.0.0 /usr/local/bin/cc-switch-server > /tmp/proxy.log 2>&1 &
 PROXY_PID=$!
-echo "[init] proxy PID=$PROXY_PID"
+echo "[init] CC Switch proxy PID=$PROXY_PID"
+
 # 等待 proxy 就绪，最多 30s
 for i in $(seq 1 15); do
   sleep 2
-  if curl -s --max-time 3 http://127.0.0.1:4096/api/status >/dev/null 2>&1; then
-    echo "[debug] proxy 就绪 (尝试 $i)"
-    curl -s http://127.0.0.1:4096/api/status | head -c 500
+  if curl -s --max-time 3 http://127.0.0.1:4096/health >/dev/null 2>&1; then
+    echo "[debug] CC Switch proxy 就绪 (尝试 $i)"
+    curl -s http://127.0.0.1:4096/health | head -c 500
     echo ""
     break
   else
@@ -78,25 +58,16 @@ for i in $(seq 1 15); do
     if ! kill -0 $PROXY_PID 2>/dev/null; then
       echo "[ERR] proxy 进程已退出，日志："
       cat /tmp/proxy.log 2>&1 || true
-      echo "[ERR] netstat:"
-      netstat -tln 2>&1 || ss -tln 2>&1 || true
       break
     fi
   fi
   if [ $i -eq 15 ]; then
     echo "[ERR] proxy 15次仍未就绪，最后日志："
     cat /tmp/proxy.log 2>&1 || true
-    netstat -tln 2>&1 || ss -tln 2>&1 || true
   fi
 done
-echo "[debug] netstat after proxy start:"
-netstat -tln 2>&1 || ss -tln 2>&1 || true
-echo "[debug] cat settings.json:"
-cat /app/config/settings.json 2>&1
-echo "[debug] proxy log head:"
-head -n 50 /tmp/proxy.log 2>&1 || true
+
 # 若 Railway 注入 PORT 且不等于 4096，额外起一个 socat 转发以兼容 Railway 健康检查
-# 注意 PORT 不能与 Xray 8080 / httpd 8081 冲突，提前启动以通过健康检查
 if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
   if [ "$PORT" = "8080" ] || [ "$PORT" = "8081" ]; then
     echo "[WARN] Railway PORT=$PORT 与 Xray/httpd 冲突，跳过 socat 转发。请在 Railway Variables 将 PORT 改为 3000 或 4096 后 Redeploy"
@@ -105,12 +76,10 @@ if [ -n "${PORT:-}" ] && [ "$PORT" != "4096" ]; then
     socat TCP-LISTEN:$PORT,fork,reuseaddr TCP:127.0.0.1:4096 > /tmp/socat.log 2>&1 &
     SOCAT_PID=$!
     echo "[proxy] socat 转发 $PORT -> 4096 已启动 PID=$SOCAT_PID"
-  else
-    echo "[proxy] 未安装 socat，跳过 PORT 转发 (不影响 Tunnel)"
   fi
 fi
 
-# === 5. 哪吒探针 (可选) ===
+# === 4. 哪吒探针 (可选) ===
 NEZHA_PATH="/app/nezha-agent"
 if [ ! -f "$NEZHA_PATH" ]; then
   echo "[nezha] 拉取 agent..."
@@ -133,7 +102,7 @@ EOF
   echo "[nezha] 已启动"
 fi
 
-# === 6. Cloudflare Tunnel ===
+# === 5. Cloudflare Tunnel ===
 if [ -z "${TUNNEL_TOKEN:-}" ]; then
   echo "❌ TUNNEL_TOKEN 未设置，隧道无法建立！"
   exit 1
@@ -145,7 +114,7 @@ sleep 5
 echo "[debug] cloudflared started PID=$CF_PID"
 cat /tmp/cf.log 2>&1 | head -n 30 || true
 echo "[debug] curl after cf start:"
-curl -s --max-time 5 http://127.0.0.1:4096/api/status && echo " [tunnel debug] proxy still ok after cloudflared start" || echo " [tunnel debug] proxy unreachable after cloudflared start (proxy log):" && cat /tmp/proxy.log 2>&1 | head -n 30 || true
+curl -s --max-time 5 http://127.0.0.1:4096/health && echo " [tunnel debug] proxy still ok after cloudflared start" || echo " [tunnel debug] proxy unreachable"
 
 # === 7. 健康监控 (15s) - 仅监控关键端口，不过度敏感 ===
 echo "[monitor] 进入健康监控循环..."
