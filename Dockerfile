@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1
 FROM teddysun/xray:latest AS xray-source
 FROM cloudflare/cloudflared:latest AS cf-source
-FROM debian:bookworm-slim
+FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash curl busybox unzip socat ca-certificates libssl3 net-tools \
-    libgtk-3-0 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
+    libgtk-3-0t64 libwebkit2gtk-4.1-0 libayatana-appindicator3-1 librsvg2-2 \
+    && busybox --install -s /usr/local/bin \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=xray-source /usr/bin/xray /usr/bin/xray
