@@ -45,6 +45,13 @@ PORT=4096 HOST=0.0.0.0 /usr/local/bin/cc-switch-server > /tmp/proxy.log 2>&1 &
 PROXY_PID=$!
 echo "[init] CC Switch proxy PID=$PROXY_PID"
 
+# shim 探针自检：opencode 二进制 + 版本（缺失则旁路 502，不致命）
+if command -v opencode >/dev/null 2>&1; then
+  echo "[shim] $(opencode --version 2>&1 | head -n 1)"
+else
+  echo "[shim] WARN: opencode 未找到，旁路请求将 502"
+fi
+
 # 等待 proxy 就绪，最多 30s
 for i in $(seq 1 15); do
   sleep 2
