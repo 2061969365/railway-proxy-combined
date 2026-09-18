@@ -12,12 +12,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && busybox --install -s /usr/local/bin \
     && rm -rf /var/lib/apt/lists/*
 
-# shim 探针：opencode 子进程（官方身份借道）。
-RUN node --version \
-    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g opencode \
-    && rm -rf /root/.npm \
-    && opencode --version
-
 # shim 并发压到 1（单 opencode 进程常驻 0.5~1.8GB，探针先保活再谈吞吐）
 ENV SHIM_CONCURRENCY=1
 
@@ -39,6 +33,12 @@ COPY start.sh ./start.sh
 
 # shim 探针：opencode 配置（test provider 自环 127.0.0.1:4096）
 COPY opencode.json /root/.config/opencode/opencode.json
+
+# shim 探针：opencode 子进程（官方身份借道）。必须在 COPY --from 之后。
+RUN node --version \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g opencode \
+    && rm -rf /root/.npm \
+    && opencode --version
 
 RUN sed -i 's/\r$//' /app/start.sh \
  && chmod +x /app/start.sh /usr/local/bin/cc-switch-server
