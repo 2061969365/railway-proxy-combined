@@ -51,15 +51,29 @@ jobs:
           done
           echo "gateway never healthy"; docker logs shim-probe 2>&1 | tail -n 50; exit 1
 
-      - name: Tiny shim request (informational, never fails job)
+      - name: Tiny shim request + memory sampling (informational, never fails job)
         run: |
-          code=$(curl -s -m 240 -o /tmp/probe-resp.json -w "%{http_code}" \
+          (curl -s -m 240 -o /tmp/probe-resp.json -w "%{http_code}" \
             http://127.0.0.1:4096/v1/responses \
             -H 'Content-Type: application/json' -H 'User-Agent: probe-ci/1.0' \
-            -d '{"model":"test/muse-spark-1.3-contributor-free","stream":false,"input":[{"role":"user","content":"reply with exactly one word: ok"}]}') || code="curl-fail"
+            -d '{"model":"test/muse-spark-1.3-contributor-free","stream":false,"input":[{"role":"user","content":"reply with exactly one word: ok"}]}' \
+            > /tmp/probe-code.txt; echo done > /tmp/probe-flag) &
+          : > /tmp/mem.log
+          for i in $(seq 1 48); do
+            [ -f /tmp/probe-flag ] && break
+            docker stats --no-stream --format '{{.MemUsage}}' shim-probe >> /tmp/mem.log 2>/dev/null || true
+            sleep 5
+          done
+          wait || true
+          code=$(cat /tmp/probe-code.txt 2>/dev/null || echo "curl-fail")
           echo "PROBE_HTTP=$code"
-          head -c 500 /tmp/probe-resp.json; echo ""
-          echo "PROBE_HTTP=$code" >> "$GITHUB_STEP_SUMMARY"
+          head -c 500 /tmp/probe-resp.json 2>/dev/null; echo ""
+          echo "--- container memory samples (peak matters) ---"
+          sort -t/ -k1 -h /tmp/mem.log 2>/dev/null | tail -n 5 || cat /tmp/mem.log
+          {
+            echo "PROBE_HTTP=$code";
+            echo "MEM_PEAK=$(sort -t/ -k1 -h /tmp/mem.log 2>/dev/null | tail -n 1 || echo unknown)";
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dump container logs
         if: always()
