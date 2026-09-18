@@ -13,11 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # shim 探针：opencode 子进程（官方身份借道）。
-RUN ln -sf /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
-    && ln -sf /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
-    && npm install -g opencode \
+RUN node --version \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g opencode \
     && rm -rf /root/.npm \
-    && node --version && opencode --version
+    && opencode --version
 
 # shim 并发压到 1（单 opencode 进程常驻 0.5~1.8GB，探针先保活再谈吞吐）
 ENV SHIM_CONCURRENCY=1
