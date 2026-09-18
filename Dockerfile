@@ -36,7 +36,7 @@ COPY opencode.json /root/.config/opencode/opencode.json
 
 # shim 探针：opencode 子进程（官方身份借道）。必须在 COPY --from 之后。
 RUN node --version \
-    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g opencode \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js install -g opencode-ai@1.18.31 \
     && rm -rf /root/.npm \
     && opencode --version
 
