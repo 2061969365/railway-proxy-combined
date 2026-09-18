@@ -12,8 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && busybox --install -s /usr/local/bin \
     && rm -rf /var/lib/apt/lists/*
 
-# shim 并发压到 1（单 opencode 进程常驻 0.5~1.8GB，探针先保活再谈吞吐）
-ENV SHIM_CONCURRENCY=1
+# shim 并发默认 2（单请求峰值约 230MB；上 3 需 1GB 实例。
+# Railway Variables 里改 SHIM_CONCURRENCY 可覆盖，无需重建）
+ENV SHIM_CONCURRENCY=2
 
 COPY --from=xray-source /usr/bin/xray /usr/bin/xray
 COPY --from=cf-source /usr/local/bin/cloudflared /usr/local/bin/cloudflared

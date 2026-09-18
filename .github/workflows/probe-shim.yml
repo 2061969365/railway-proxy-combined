@@ -33,7 +33,7 @@ jobs:
           docker run -d --name shim-probe \
             -p 4096:4096 \
             -e TUNNEL_TOKEN=dummy-ci-token \
-            -e SHIM_CONCURRENCY=1 \
+            -e SHIM_CONCURRENCY=2 \
             shim-probe:ci
           sleep 5
           docker ps --filter name=shim-probe
